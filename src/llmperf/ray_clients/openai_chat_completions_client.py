@@ -89,16 +89,18 @@ class OpenAIChatCompletionsClient(LLMClient):
                         raise RuntimeError(data["error"]["message"])
                         
                     delta = data["choices"][0]["delta"]
-                    if delta.get("content", None):
-                        if not ttft:
+                    if delta.get("content", None) or delta.get("reasoning_content", None):#补充推理 reasoning_content
+                        if ttft == 0:
                             ttft = time.monotonic() - start_time
                             time_to_next_token.append(ttft)
                         else:
                             time_to_next_token.append(
                                 time.monotonic() - most_recent_received_token_time
                             )
-                        most_recent_received_token_time = time.monotonic()
-                        generated_text += delta["content"]
+                        if delta.get("reasoning_content", None):
+                            generated_text += delta["reasoning_content"]
+                        else:
+                            generated_text += delta["content"]
 
             total_request_time = time.monotonic() - start_time
             output_throughput = tokens_received / total_request_time
