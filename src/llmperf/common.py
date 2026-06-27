@@ -1,4 +1,5 @@
 from typing import List
+from llmperf.ray_clients.anthropic_messages_client import AnthropicMessagesClient
 from llmperf.ray_clients.litellm_client import LiteLLMClient
 from llmperf.ray_clients.openai_chat_completions_client import (
     OpenAIChatCompletionsClient,
@@ -24,6 +25,8 @@ def construct_clients(llm_api: str, num_clients: int) -> List[LLMClient]:
     """
     if llm_api == "openai":
         clients = [OpenAIChatCompletionsClient.remote() for _ in range(num_clients)]
+    elif llm_api == "anthropic":
+        clients = [AnthropicMessagesClient.remote() for _ in range(num_clients)]
     elif llm_api == "sagemaker":
         clients = [SageMakerClient.remote() for _ in range(num_clients)]
     elif llm_api == "vertexai":

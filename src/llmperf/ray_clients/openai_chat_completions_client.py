@@ -20,7 +20,7 @@ class OpenAIChatCompletionsClient(LLMClient):
         prompt, prompt_len = prompt
 
         message = [
-            {"role": "system", "content": ""},
+         #   {"role": "system", "content": ""},
             {"role": "user", "content": prompt},
         ]
         model = request_config.model
@@ -28,6 +28,9 @@ class OpenAIChatCompletionsClient(LLMClient):
             "model": model,
             "messages": message,
             "stream": True,
+            #"stream_options": {
+            #        "include_usage": True
+            #    }
         }
         sampling_params = request_config.sampling_params
         body.update(sampling_params or {})
@@ -87,7 +90,15 @@ class OpenAIChatCompletionsClient(LLMClient):
                         error_msg = data["error"]["message"]
                         error_response_code = data["error"]["code"]
                         raise RuntimeError(data["error"]["message"])
-                        
+                    # Check if 'choices' exists
+                    if "choices" not in data:
+                        continue
+                    # Check if choices array is not empty
+                    if not data["choices"] or len(data["choices"]) == 0:
+                        continue    
+                    choice = data["choices"][0]
+                    if "delta" not in choice:
+                        continue
                     delta = data["choices"][0]["delta"]
                     if delta.get("content", None) or delta.get("reasoning_content", None):#补充推理 reasoning_content
                         if ttft == 0:
@@ -104,12 +115,18 @@ class OpenAIChatCompletionsClient(LLMClient):
 
             total_request_time = time.monotonic() - start_time
             output_throughput = tokens_received / total_request_time
+            
 
         except Exception as e:
             metrics[common_metrics.ERROR_MSG] = error_msg
             metrics[common_metrics.ERROR_CODE] = error_response_code
+            tokens_received = 1
+            print ("-------------body-------------")
+            print (body)
+            print ("-------------body-------------")
             print(f"Warning Or Error: {e}")
             print(error_response_code)
+            print(error_msg)
 
         metrics[common_metrics.INTER_TOKEN_LAT] = sum(time_to_next_token) #This should be same as metrics[common_metrics.E2E_LAT]. Leave it here for now
         metrics[common_metrics.TTFT] = ttft

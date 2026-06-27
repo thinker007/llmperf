@@ -58,11 +58,27 @@ python token_benchmark_ray.py \
 ```
 
 ### Anthropic
+
+`--llm-api anthropic` uses a native client that streams directly against the
+Anthropic Messages API (`POST /v1/messages`) — no LiteLLM layer in between, so
+latency measurements reflect the endpoint itself. It also handles reasoning
+models (`thinking_delta` blocks count toward TTFT). Point `ANTHROPIC_API_BASE`
+at any `/v1/messages`-compatible endpoint (default `https://api.anthropic.com`).
+To benchmark via LiteLLM instead, use `--llm-api litellm --model anthropic/<model>`.
+
+Environment variables:
+- `ANTHROPIC_API_KEY` (required) — sent as the `x-api-key` header.
+- `ANTHROPIC_API_BASE` (optional) — default `https://api.anthropic.com`.
+- `ANTHROPIC_VERSION` (optional) — default `2023-06-01`.
+
+`--mean-output-tokens` maps to the required `max_tokens` field.
+
 ```bash
 export ANTHROPIC_API_KEY=secret_abcdefg
+# export ANTHROPIC_API_BASE=https://your-proxy.example.com   # optional
 
 python token_benchmark_ray.py \
---model "claude-2" \
+--model "claude-sonnet-4-6" \
 --mean-input-tokens 550 \
 --stddev-input-tokens 150 \
 --mean-output-tokens 150 \
@@ -225,11 +241,14 @@ python llm_correctness.py \
 
 ### Anthropic
 
+Uses the same native Messages API (`POST /v1/messages`) client. Set
+`ANTHROPIC_API_BASE` to target a compatible proxy/self-hosted endpoint.
+
 ```bash
 export ANTHROPIC_API_KEY=secret_abcdefg
 
 python llm_correctness.py \
---model "claude-2" \
+--model "claude-sonnet-4-6" \
 --llm-api "anthropic"  \
 --max-num-completed-requests 5 \
 --timeout 600 \
