@@ -29,6 +29,13 @@ Where the lines are randomly sampled from a collection of lines from Shakespeare
 
 To run the most basic load test you can the token_benchmark_ray script.
 
+### Lightweight async alternative
+
+If you don't need Ray's distributed actor model, `python -m llmperf.benchmark`
+runs the same TTFT/ITL/throughput measurements against `litellm.acompletion()`
+using a plain asyncio worker-pool — zero new dependencies. See
+[docs/benchmark.md](docs/benchmark.md) for usage and how its metrics differ
+from the Ray version above.
 
 ### Caveats and Disclaimers
 
