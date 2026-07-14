@@ -10,6 +10,14 @@ class _Delta(dict):
     """模拟 litellm chunk 的 delta：支持 .get 且 truthy。"""
 
 
+class _ObjDelta:
+    """模拟 litellm 新版 pydantic delta：只有属性，无 .get。"""
+
+    def __init__(self, content=None, reasoning_content=None):
+        self.content = content
+        self.reasoning_content = reasoning_content
+
+
 def _chunk(content=None, reasoning=None):
     delta = _Delta()
     if content is not None:
@@ -140,3 +148,21 @@ def test_run_benchmark_concurrency_stays_at_n(monkeypatch):
     assert state["peak"] == 3  # 峰值 == N
     # 队列充足期间，至少多数采样保持满载 N（不长期塌陷）。
     assert max(state["samples"]) == 3
+
+
+def test_extract_content_dict():
+    assert runner.extract_content({"content": "x"}) == "x"
+
+
+def test_extract_content_dict_reasoning_priority():
+    assert runner.extract_content({"reasoning_content": "r", "content": "x"}) == "r"
+
+
+def test_extract_content_object_getattr_only():
+    # pydantic-like：无 .get，只能 getattr。
+    assert runner.extract_content(_ObjDelta(content="x")) == "x"
+
+
+def test_extract_content_empty_returns_none():
+    assert runner.extract_content({}) is None
+    assert runner.extract_content(_ObjDelta()) is None

@@ -16,6 +16,23 @@ from llmperf import common_metrics as cm
 from llmperf.benchmark.prompts import sample_output_len, sample_prompt
 
 
+def _get(delta: Any, key: str) -> Optional[str]:
+    """dict（含子类）走 .get，对象走 getattr。"""
+    if isinstance(delta, dict):
+        return delta.get(key, None)
+    return getattr(delta, key, None)
+
+
+def extract_content(delta: Any) -> Optional[str]:
+    """从 litellm 流式 delta 取增量文本，兼容 dict 与 pydantic 对象。
+
+    优先 reasoning_content，其次 content（保留 runner 原语义）。
+    """
+    reasoning = _get(delta, "reasoning_content")
+    content = _get(delta, "content")
+    return reasoning or content
+
+
 @dataclass
 class BenchmarkConfig:
     model: str
@@ -60,15 +77,14 @@ async def _single_request(
         start = time.monotonic()
         response = await acompletion(**body)
         async for tok in response:
-            if tok.choices[0].delta:
-                delta = tok.choices[0].delta
-                if delta.get("content", None) or delta.get("reasoning_content", None):
-                    if ttft == 0:
-                        ttft = time.monotonic() - start
-                    if delta.get("reasoning_content", None):
-                        generated_text += delta["reasoning_content"]
-                    else:
-                        generated_text += delta["content"]
+            delta = tok.choices[0].delta
+            if not delta:
+                continue
+            piece = extract_content(delta)
+            if piece:
+                if ttft == 0:
+                    ttft = time.monotonic() - start
+                generated_text += piece
         e2e = time.monotonic() - start
     except Exception as e:  # 修正源码吞噬 bug：从 e 真实提取（spec §13）。
         error_msg = str(e)
