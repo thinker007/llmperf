@@ -92,7 +92,8 @@ async def _single_request(
             error_code = "empty_response"
     except Exception as e:  # 修正源码吞噬 bug：从 e 真实提取（spec §13）。
         error_msg = str(e)
-        error_code = str(getattr(e, "status_code", None) or "unknown")
+        sc = getattr(e, "status_code", None)
+        error_code = "unknown" if sc is None else str(sc)
     return {
         cm.TTFT: ttft,
         cm.E2E_LAT: e2e,

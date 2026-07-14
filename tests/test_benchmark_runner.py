@@ -211,3 +211,13 @@ def test_single_request_empty_stream_marked_failed(monkeypatch):
     m = asyncio.run(runner._single_request(_config(), "p", 1, 50))
     assert m[cm.ERROR_CODE] == "empty_response"
     assert m[cm.NUM_OUTPUT_TOKENS] == 0
+
+
+def test_single_request_status_code_zero_not_swallowed(monkeypatch):
+    exc = RuntimeError("boom")
+    exc.status_code = 0  # falsy 但合法
+    monkeypatch.setattr(runner, "acompletion", _make_acompletion([], raise_exc=exc))
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 0)
+
+    m = asyncio.run(runner._single_request(_config(), "p", 1, 50))
+    assert m[cm.ERROR_CODE] == "0"
