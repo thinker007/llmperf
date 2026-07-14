@@ -268,3 +268,33 @@ def test_worker_passes_remaining_budget_not_full_timeout(monkeypatch):
     # 透传的单请求 timeout 是"剩余预算"，必 <= 全局 timeout。
     assert captured["timeout"] <= 30
     assert captured["timeout"] > 0
+
+
+def test_worker_derives_shrinking_budget(monkeypatch):
+    # 推进 time.monotonic：每次调用 +1s，使 worker 计算出的 elapsed > 0，
+    # 从而透传的单请求 timeout 严格小于全局 timeout（证明确实按剩余预算派生，
+    # 而非无条件透传 config.timeout）。
+    ticks = {"t": 0.0}
+
+    def _fake_monotonic():
+        ticks["t"] += 1.0
+        return ticks["t"]
+
+    captured = {}
+    monkeypatch.setattr(runner.time, "monotonic", _fake_monotonic)
+    monkeypatch.setattr(
+        runner,
+        "acompletion",
+        _make_capturing_acompletion(captured, [_chunk(content="x")]),
+    )
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 1)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+
+    asyncio.run(
+        runner.run_benchmark(
+            _config(timeout=30, num_concurrent_requests=1, max_num_completed_requests=1)
+        )
+    )
+    # elapsed 已 > 0，故透传 timeout 必严格小于全局 30，且仍为正。
+    assert 0 < captured["timeout"] < 30
