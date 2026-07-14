@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -81,7 +82,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     summary["num_concurrent_requests"] = args.num_concurrent_requests
     summary["timestamp"] = int(time.time())
     summary["litellm_version"] = getattr(litellm, "__version__", "unknown")
-    summary.update(args.metadata)
+    for k, v in args.metadata.items():
+        if k in summary:
+            print(
+                "warning: metadata key '%s' conflicts with a built-in field "
+                "and was ignored" % k,
+                file=sys.stderr,
+            )
+            continue
+        summary[k] = v
 
     print(json.dumps(summary, indent=4, default=str))
 

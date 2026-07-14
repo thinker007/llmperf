@@ -1,6 +1,7 @@
 """CLI 解析单测：metadata/JSON 边界 + 文件名清洗。无网络。"""
 
 import argparse
+import json
 
 import pytest
 
@@ -30,3 +31,24 @@ def test_additional_sampling_params_invalid_json_exits():
     # type=json.loads 让 argparse 对非法 JSON 直接报错退出（spec I4）。
     with pytest.raises(SystemExit):
         cli.main(["--model", "gpt-4o", "--additional-sampling-params", "{not json}"])
+
+
+def test_metadata_does_not_override_builtin_keys(monkeypatch, capsys):
+    async def _fake_run_benchmark(config):
+        return ([], 0.0)
+
+    monkeypatch.setattr(cli, "run_benchmark", _fake_run_benchmark)
+
+    cli.main(
+        [
+            "--model",
+            "real-model",
+            "--metadata",
+            "model=fake,extra=ok",
+        ]
+    )
+    out, err = capsys.readouterr()
+    summary = json.loads(out)
+    assert summary["model"] == "real-model"  # 内建键未被覆盖
+    assert summary["extra"] == "ok"  # 非冲突键写入
+    assert "model" in err and "ignored" in err  # stderr 有冲突 warning
