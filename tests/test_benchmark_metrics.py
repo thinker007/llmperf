@@ -117,3 +117,20 @@ def test_summarize_error_code_keys_are_str_and_json_safe():
     freq = out[cm.ERROR_CODE_FREQ]
     assert all(isinstance(k, str) for k in freq)
     json.dumps(out)  # 不抛异常
+
+
+def test_summarize_counts_empty_response_as_error():
+    results = [
+        {
+            cm.TTFT: 0.0,
+            cm.E2E_LAT: 0.0,
+            cm.NUM_INPUT_TOKENS: 5,
+            cm.NUM_OUTPUT_TOKENS: 0,
+            cm.ERROR_CODE: "empty_response",
+            cm.ERROR_MSG: "",
+        }
+    ]
+    out = metrics.summarize(results, wall_clock_s=1.0)
+    assert out[cm.NUM_ERRORS] == 1
+    assert out[cm.NUM_COMPLETED_REQUESTS] == 0
+    assert out[cm.ERROR_CODE_FREQ]["empty_response"] == 1

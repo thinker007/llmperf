@@ -88,6 +88,8 @@ async def _single_request(
                 generated_text += piece
         e2e = time.monotonic() - start
         num_output_tokens = token_counter(model=config.model, text=generated_text)
+        if generated_text == "":
+            error_code = "empty_response"
     except Exception as e:  # 修正源码吞噬 bug：从 e 真实提取（spec §13）。
         error_msg = str(e)
         error_code = str(getattr(e, "status_code", None) or "unknown")

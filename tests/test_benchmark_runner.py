@@ -201,3 +201,13 @@ def test_run_benchmark_keeps_results_when_token_counter_errors(monkeypatch):
     )
     assert len(results) == 4  # 全部保留，未因异常丢失
     assert all(r[cm.ERROR_CODE] is not None for r in results)
+
+
+def test_single_request_empty_stream_marked_failed(monkeypatch):
+    # 流正常但零 content：判为 empty_response，不得当成功。
+    monkeypatch.setattr(runner, "acompletion", _make_acompletion([]))
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 0)
+
+    m = asyncio.run(runner._single_request(_config(), "p", 1, 50))
+    assert m[cm.ERROR_CODE] == "empty_response"
+    assert m[cm.NUM_OUTPUT_TOKENS] == 0
