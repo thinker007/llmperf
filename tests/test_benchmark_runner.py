@@ -221,3 +221,50 @@ def test_single_request_status_code_zero_not_swallowed(monkeypatch):
 
     m = asyncio.run(runner._single_request(_config(), "p", 1, 50))
     assert m[cm.ERROR_CODE] == "0"
+
+
+def _make_capturing_acompletion(captured, chunks):
+    async def _fake(**body):
+        captured.update(body)
+
+        async def _gen():
+            for c in chunks:
+                yield c
+
+        return _gen()
+
+    return _fake
+
+
+def test_single_request_passes_explicit_request_timeout(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        runner,
+        "acompletion",
+        _make_capturing_acompletion(captured, [_chunk(content="x")]),
+    )
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 1)
+
+    asyncio.run(runner._single_request(_config(timeout=30), "p", 1, 50, 12.5))
+    assert captured["timeout"] == 12.5
+
+
+def test_worker_passes_remaining_budget_not_full_timeout(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        runner,
+        "acompletion",
+        _make_capturing_acompletion(captured, [_chunk(content="x")]),
+    )
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 1)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+
+    asyncio.run(
+        runner.run_benchmark(
+            _config(timeout=30, num_concurrent_requests=1, max_num_completed_requests=1)
+        )
+    )
+    # 透传的单请求 timeout 是"剩余预算"，必 <= 全局 timeout。
+    assert captured["timeout"] <= 30
+    assert captured["timeout"] > 0

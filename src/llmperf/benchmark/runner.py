@@ -51,6 +51,7 @@ async def _single_request(
     prompt_text: str,
     num_input_tokens: int,
     sampled_max_tokens: int,
+    request_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """发一条流式请求，采集 TTFT/E2E/output。骨架照搬 litellm_client.py:61-103。"""
     messages = [
@@ -62,8 +63,8 @@ async def _single_request(
         "messages": messages,
         "stream": True,
         "max_tokens": sampled_max_tokens,
-        # HTTP 层兜底超时，防单请求 hang 架空整体 timeout（spec Y2）。
-        "timeout": config.timeout,
+        # 单请求 HTTP 超时 = 剩余全局预算（worker 传入）；直接调用回退全局 timeout。
+        "timeout": config.timeout if request_timeout is None else request_timeout,
     }
     body.update(config.additional_sampling_params or {})
 
@@ -128,14 +129,16 @@ async def run_benchmark(
     async def worker() -> None:
         nonlocal started
         while True:
-            if time.monotonic() - start >= config.timeout:
+            elapsed = time.monotonic() - start
+            if elapsed >= config.timeout:
                 break  # 到点停止取新任务，不 cancel 在途请求（spec §4.3）。
             try:
                 text, n_in, max_tokens = queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
             started += 1
-            m = await _single_request(config, text, n_in, max_tokens)
+            request_timeout = max(0.0, config.timeout - elapsed)
+            m = await _single_request(config, text, n_in, max_tokens, request_timeout)
             results.append(m)
 
     await asyncio.gather(*[worker() for _ in range(config.num_concurrent_requests)])
