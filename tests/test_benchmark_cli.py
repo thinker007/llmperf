@@ -1,5 +1,7 @@
 """CLI 解析单测：metadata/JSON 边界 + 文件名清洗。无网络。"""
 
+import argparse
+
 import pytest
 
 from llmperf.benchmark import __main__ as cli
@@ -12,6 +14,11 @@ def test_parse_metadata_splits_on_first_equals():
 
 def test_parse_metadata_empty():
     assert cli.parse_metadata("") == {}
+
+
+def test_parse_metadata_missing_equals_raises():
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli.parse_metadata("foo")
 
 
 def test_clean_filename_replaces_special_chars():

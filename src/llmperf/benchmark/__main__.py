@@ -15,11 +15,18 @@ from llmperf.benchmark.runner import BenchmarkConfig, run_benchmark
 
 
 def parse_metadata(raw: str) -> Dict[str, str]:
-    """'a=1,b=x=y' → {'a':'1','b':'x=y'}。按首个 '=' 分割，重复 key 后覆盖。"""
+    """'a=1,b=x=y' → {'a':'1','b':'x=y'}。按首个 '=' 分割，重复 key 后覆盖。
+
+    不含 '=' 的项抛 argparse.ArgumentTypeError，交由 argparse 友好报错。
+    """
     out: Dict[str, str] = {}
     if not raw:
         return out
     for item in raw.split(","):
+        if "=" not in item:
+            raise argparse.ArgumentTypeError(
+                "metadata item '%s' must be key=value" % item
+            )
         key, value = item.split("=", 1)
         out[key] = value
     return out
@@ -49,13 +56,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # 非法 JSON 由 argparse 直接报错退出（spec I4）。
     p.add_argument("--additional-sampling-params", type=json.loads, default={})
     p.add_argument("--results-dir", type=str, default="")
-    p.add_argument("--metadata", type=str, default="")
+    p.add_argument("--metadata", type=parse_metadata, default={})
     return p
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = _build_parser().parse_args(argv)
-    user_metadata = parse_metadata(args.metadata)
 
     config = BenchmarkConfig(
         model=args.model,
@@ -75,7 +81,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     summary["num_concurrent_requests"] = args.num_concurrent_requests
     summary["timestamp"] = int(time.time())
     summary["litellm_version"] = getattr(litellm, "__version__", "unknown")
-    summary.update(user_metadata)
+    summary.update(args.metadata)
 
     print(json.dumps(summary, indent=4, default=str))
 
