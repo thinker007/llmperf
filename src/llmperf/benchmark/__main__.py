@@ -62,7 +62,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> None:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.num_concurrent_requests < 1:
+        parser.error("--num-concurrent-requests must be >= 1")
+    if args.max_num_completed_requests < 1:
+        parser.error("--max-num-completed-requests must be >= 1")
+    if args.timeout <= 0:
+        parser.error("--timeout must be > 0")
 
     config = BenchmarkConfig(
         model=args.model,

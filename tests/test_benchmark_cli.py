@@ -52,3 +52,17 @@ def test_metadata_does_not_override_builtin_keys(monkeypatch, capsys):
     assert summary["model"] == "real-model"  # 内建键未被覆盖
     assert summary["extra"] == "ok"  # 非冲突键写入
     assert "model" in err and "ignored" in err  # stderr 有冲突 warning
+
+
+@pytest.mark.parametrize(
+    "bad_args",
+    [
+        ["--num-concurrent-requests", "0"],
+        ["--max-num-completed-requests", "-1"],
+        ["--timeout", "0"],
+    ],
+)
+def test_main_rejects_non_positive_numeric_args(bad_args):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--model", "m"] + bad_args)
+    assert exc.value.code == 2  # parser.error 退出码
