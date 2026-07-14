@@ -166,3 +166,38 @@ def test_extract_content_object_getattr_only():
 def test_extract_content_empty_returns_none():
     assert runner.extract_content({}) is None
     assert runner.extract_content(_ObjDelta()) is None
+
+
+def test_single_request_survives_token_counter_error(monkeypatch):
+    # token_counter 抛异常时，_single_request 不外抛，返回带 error_code 的结果。
+    chunks = [_chunk(content="hi")]
+    monkeypatch.setattr(runner, "acompletion", _make_acompletion(chunks))
+
+    def _boom(model, text):
+        raise RuntimeError("tokenizer load failed")
+
+    monkeypatch.setattr(runner, "token_counter", _boom)
+
+    m = asyncio.run(runner._single_request(_config(), "p", 1, 50))
+    assert m[cm.ERROR_CODE] is not None
+    assert m[cm.NUM_OUTPUT_TOKENS] == 0
+
+
+def test_run_benchmark_keeps_results_when_token_counter_errors(monkeypatch):
+    # 单点异常不得让 gather 整体崩溃、丢弃已完成结果。
+    monkeypatch.setattr(
+        runner, "acompletion", _make_acompletion([_chunk(content="hi")])
+    )
+
+    def _boom(model, text):
+        raise RuntimeError("tokenizer load failed")
+
+    monkeypatch.setattr(runner, "token_counter", _boom)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+
+    results, wall = asyncio.run(
+        runner.run_benchmark(_config(max_num_completed_requests=4))
+    )
+    assert len(results) == 4  # 全部保留，未因异常丢失
+    assert all(r[cm.ERROR_CODE] is not None for r in results)

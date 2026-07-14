@@ -72,6 +72,7 @@ async def _single_request(
     error_code: Optional[str] = None
     error_msg = ""
     e2e = 0.0
+    num_output_tokens = 0
 
     try:
         start = time.monotonic()
@@ -86,11 +87,10 @@ async def _single_request(
                     ttft = time.monotonic() - start
                 generated_text += piece
         e2e = time.monotonic() - start
+        num_output_tokens = token_counter(model=config.model, text=generated_text)
     except Exception as e:  # 修正源码吞噬 bug：从 e 真实提取（spec §13）。
         error_msg = str(e)
         error_code = str(getattr(e, "status_code", None) or "unknown")
-
-    num_output_tokens = token_counter(model=config.model, text=generated_text)
     return {
         cm.TTFT: ttft,
         cm.E2E_LAT: e2e,
