@@ -24,7 +24,7 @@
 
 ---
 
-### Task A1: delta 防御式提取 `extract_content`
+### Task 1: [A1] delta 防御式提取 `extract_content`
 
 **Files:**
 - Modify: `src/llmperf/benchmark/runner.py`（新增模块级 `_get`/`extract_content`；重写 `_single_request` 采集循环 62-71）
@@ -126,7 +126,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task A2: `_single_request` 绝不外抛（token_counter 纳入兜底）
+### Task 2: [A2] `_single_request` 绝不外抛（token_counter 纳入兜底）
 
 **Files:**
 - Modify: `src/llmperf/benchmark/runner.py`（将 `token_counter` 计算移入 `try`；`num_output_tokens` 预置 0）
@@ -236,7 +236,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task A3: 空流判失败 `empty_response`
+### Task 3: [A3] 空流判失败 `empty_response`
 
 **Files:**
 - Modify: `src/llmperf/benchmark/runner.py`（`try` 内 token_counter 后加空流判定）
@@ -318,7 +318,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task A4: `status_code == 0` 不被 `or` 吞掉
+### Task 4: [A4] `status_code == 0` 不被 `or` 吞掉
 
 **Files:**
 - Modify: `src/llmperf/benchmark/runner.py`（`except` 内 status_code 提取改显式判 `None`）
@@ -384,7 +384,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task B1: `parse_metadata` 友好报错
+### Task 5: [B1] `parse_metadata` 友好报错
 
 **Files:**
 - Modify: `src/llmperf/benchmark/__main__.py`（`parse_metadata` 无 `=` 抛 `ArgumentTypeError`；`--metadata` 改 `type=parse_metadata`；`main` 删手工调用）
@@ -471,7 +471,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task B2: 单请求 timeout 内部派生为剩余预算
+### Task 6: [B2] 单请求 timeout 内部派生为剩余预算
 
 **Files:**
 - Modify: `src/llmperf/benchmark/runner.py`（`_single_request` 增 `request_timeout` 可选参；`body["timeout"]` 用之；`worker` 传剩余预算）
@@ -607,7 +607,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task B3: metadata 冲突——内建键优先 + stderr warning
+### Task 7: [B3] metadata 冲突——内建键优先 + stderr warning
 
 **Files:**
 - Modify: `src/llmperf/benchmark/__main__.py`（新增 `import sys`；`summary.update(user_metadata)` 换逐键合并）
@@ -698,7 +698,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task B4: 非法数值 sanity 校验
+### Task 8: [B4] 非法数值 sanity 校验
 
 **Files:**
 - Modify: `src/llmperf/benchmark/__main__.py`（`main()` 组装 config 前校验并 `parser.error`）
@@ -776,7 +776,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task Docs: 同步模块文档与 spec 状态
+### Task 9: [Docs] 同步模块文档与 spec 状态
 
 **Files:**
 - Modify: `src/llmperf/benchmark/CLAUDE.md`（测试数、语义变化、`extract_content`/`request_timeout` 接口）
