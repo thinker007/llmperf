@@ -66,7 +66,6 @@ async def _single_request(
         # 单请求 HTTP 超时 = 剩余全局预算（worker 传入）；直接调用回退全局 timeout。
         "timeout": config.timeout if request_timeout is None else request_timeout,
     }
-    body.update(config.additional_sampling_params or {})
 
     ttft = 0.0
     generated_text = ""
@@ -76,6 +75,9 @@ async def _single_request(
     num_output_tokens = 0
 
     try:
+        # body 组装放进 try：非 dict 的 additional_sampling_params 会让 update 抛
+        # TypeError，A2 要求它被就地转成失败记录而非逃逸崩池（评审 finding #1）。
+        body.update(config.additional_sampling_params or {})
         start = time.monotonic()
         response = await acompletion(**body)
         async for tok in response:

@@ -33,6 +33,15 @@ def test_additional_sampling_params_invalid_json_exits():
         cli.main(["--model", "gpt-4o", "--additional-sampling-params", "{not json}"])
 
 
+@pytest.mark.parametrize("bad", ["[1,2]", "5", '"x"', "true"])
+def test_additional_sampling_params_non_object_exits(bad):
+    # 合法 JSON 但非对象（list/int/str/bool）必须友好报错退出（退出码 2），
+    # 而不是让下游 dict.update 抛 TypeError 崩掉整个压测池（评审 finding #1）。
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--model", "gpt-4o", "--additional-sampling-params", bad])
+    assert exc.value.code == 2
+
+
 def test_metadata_does_not_override_builtin_keys(monkeypatch, capsys):
     async def _fake_run_benchmark(config):
         return ([], 0.0)

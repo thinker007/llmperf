@@ -7,7 +7,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import litellm
 
@@ -33,6 +33,22 @@ def parse_metadata(raw: str) -> Dict[str, str]:
     return out
 
 
+def parse_json_dict(raw: str) -> Dict[str, Any]:
+    """--additional-sampling-params：必须解析成 JSON 对象。
+
+    非法 JSON 由 json.loads 抛 ValueError、合法但非对象（list/int/str/bool）由此处
+    抛 ArgumentTypeError——两者都被 argparse 转成友好报错并以退出码 2 退出，避免
+    非 dict 值流到下游 body.update() 抛 TypeError 崩掉整个压测池。
+    """
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise argparse.ArgumentTypeError(
+            "--additional-sampling-params must be a JSON object, got %s"
+            % type(value).__name__
+        )
+    return value
+
+
 def clean_filename(model: str, mean_input: int, mean_output: int) -> str:
     """照搬 token_benchmark_ray.py:339-341 的两步清洗。"""
     filename = f"{model}_{mean_input}_{mean_output}"
@@ -54,8 +70,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-concurrent-requests", type=int, default=10)
     p.add_argument("--max-num-completed-requests", type=int, default=10)
     p.add_argument("--timeout", type=int, default=90)
-    # 非法 JSON 由 argparse 直接报错退出（spec I4）。
-    p.add_argument("--additional-sampling-params", type=json.loads, default={})
+    # 非法 JSON 或非对象由 argparse 直接友好报错退出（spec I4 + 评审 finding #1）。
+    p.add_argument("--additional-sampling-params", type=parse_json_dict, default={})
     p.add_argument("--results-dir", type=str, default="")
     p.add_argument("--metadata", type=parse_metadata, default={})
     return p

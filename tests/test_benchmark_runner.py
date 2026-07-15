@@ -101,6 +101,23 @@ def test_single_request_error_extracts_from_exception(monkeypatch):
     assert m[cm.ERROR_MSG] == "rate limited"
 
 
+def test_single_request_non_dict_sampling_params_no_escape(monkeypatch):
+    # 库直调路径（绕过 CLI 校验）：additional_sampling_params 非 dict 时，
+    # body.update 会抛 TypeError；A2 要求它被就地转成失败记录，绝不逃逸出
+    # _single_request 把整个 worker 池带崩（评审 finding #1 的运行时兜底）。
+    def _boom(**body):
+        raise AssertionError("acompletion 不应被触及——应在 body 组装期就失败")
+
+    monkeypatch.setattr(runner, "acompletion", _boom)
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 0)
+
+    m = asyncio.run(
+        runner._single_request(_config(additional_sampling_params=[1, 2]), "p", 1, 50)
+    )
+    assert m[cm.ERROR_CODE] is not None  # 转成失败记录，而非抛出
+    assert m[cm.ERROR_MSG] != ""
+
+
 def test_run_benchmark_completes_bounded(monkeypatch):
     chunks = [_chunk(content="a"), _chunk(content="b")]
     monkeypatch.setattr(runner, "acompletion", _make_acompletion(chunks))
