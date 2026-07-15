@@ -166,3 +166,37 @@ while num_prompt_tokens < 基础前缀的 token 数:
 - 单测：`tests/test_benchmark_{prompts,metrics,runner,cli}.py`
 - 使用文档：`docs/benchmark.md`
 - 设计规格 + 实施计划：`docs/superpowers/specs/`、`docs/superpowers/plans/`
+
+## 九、第三次改造：从"能跑通"到"生产可用"的硬化
+
+第二次改造让 `benchmark` 模块**跑得通**（happy path 全绿）。但"跑得通"和"敢丢到生产环境压一整晚"是两回事。这次（2026-07-15）做的就是把中间那道坎填平——8 个原子改动，分成两簇：A 簇管"运行期别崩别算错"，B 簇管"用户手滑了给个人话报错而不是一脸 traceback"。
+
+### A 簇：真实环境里，对象不会永远长你想的样子
+happy-path 代码最爱做的假设是"流式返回的每个 delta 都是我预期的那个结构"。真实的 litellm 背后接了 100+ 家厂商，有的 delta 是 dict、有的是 pydantic 对象，有的模型干脆一个 token 都不吐。四个坑逐一堵：
+
+- **A1 防御式提取**：把"从 delta 里抠 `reasoning_content`/`content`"抽成一个纯函数 `extract_content`，内部 `_get` 同时兼容 `dict.get` 和 `getattr` 两种取值方式。好处不只是健壮——它现在能脱离网络直接单测四种 delta 形态，而不用真发一次请求去撞运气。
+- **A2 异常绝不逃逸**：把整个 `_single_request` 的生命周期（连 token 计费都算上）包进一个 `try/except`。任何一个请求内部炸了，都就地变成一条带 `error_code` 的失败记录返回——**绝不让它冒泡上去把整个 worker 协程带崩**。压测跑到第 998 个请求时因为一个畸形响应崩掉、前面 997 个结果全丢，是最让人肉疼的失败模式。
+- **A3 空流算失败**（⚠️ 语义变更）：模型成功返回但一个 token 都没吐，以前被算成"成功"，混进延迟分位数里拉低数据。现在明确判成 `empty_response` 错误。
+- **A4 一个 `or` 引发的血案**：原代码写 `error_code = str(e.status_code or "unknown")`。看着没问题？`status_code == 0` 是**合法值**（某些传输层错误就是 0），但 `0 or "unknown"` 在 Python 里等于 `"unknown"`——真实的 0 被 `or` 悄悄吞掉了。修法是老老实实判 `None`：`"unknown" if sc is None else str(sc)`。**教训：`x or default` 这种写法，只有当 `x` 的所有"假值"（0、""、[]、False）都确实该走 default 时才安全，否则用 `x if x is not None else default`。**
+
+### B 簇：边界处给人话
+- **B1**：`--metadata foo`（忘了写 `=`）以前会产生诡异结果，现在直接 argparse 友好报错、退出码 2。
+- **B2 超时=剩余预算**（⚠️ 语义变更）：以前每个请求都透传满一个 `--timeout` 给 HTTP 层。想象 `--timeout 600`，第 599 秒才发出的慢请求，居然还能再独占 600 秒——整体预算形同虚设。改成透传"剩余预算"`max(0, timeout − 已用时)`，慢请求最多拖到总预算耗尽为止。
+- **B3 内建键优先**：`--metadata model=假的` 不该把汇总里真实的 `model` 字段覆盖掉。撞名就跳过 + stderr 告警，内建字段永远赢。
+- **B4 数值下限**：`--num-concurrent-requests 0` 以前会静默跑出一份全 `None` 的空报告（无 worker）。现在非正值直接退出码 2 拒绝。
+
+### 这次真正的"元教训"：工具会骗你，git 不会
+这轮是用 **SDD（子代理驱动开发）** 跑的——每个任务派一个全新的子代理去实现、再派一个去评审。听起来很美，现实给了三记闷棍：
+
+1. **Task 1 的子代理"越界"了**：让它只改 `runner.py`，它却顺手改了 6 个不相关文件（包括 54 行主脚本），还没提交、报告也是坏的。**处理**：把越界改动全部回退到基线，只保留经我逐行核对无误的范围内工作，再提交。此后每次派活都**明确点名允许改哪些文件、禁止碰其他**。
+2. **连续三个子代理死于 "Prompt is too long"**：Task 7、8 的实现代理、8 的评审代理接连因为"控制器上下文太大"派发即死。其中两个是**写完文件甚至提交完才断的**——这就是为什么 **`.superpowers/sdd/progress.md` 这本账本 + `git log` 才是唯一可信的事实来源**。上下文会被压缩、会丢，但账本里写的提交号在 git 里真实存在。断了就从账本恢复，而不是靠"我记得刚才做到哪了"。
+3. **打捞模式（salvage）**：代理死了但活儿留下了，就地验证（范围干净？diff 匹配契约？测试绿？）→ 补一份打捞报告 → 继续。Task 8 的独立评审门因此没跑成，就把它**折叠进最终的全分支评审**（反正那轮横扫全部 8 个提交），而不是假装它评过了。
+
+**顺带一个环境坑**：某个时刻本机 `.venv` 里的 `pydantic`（2.4.2）配不上 `litellm`（1.73.6，要 import 2.5+ 才有的 `Discriminator`），`pytest` 一 import 就崩。这跟我们改的代码半毛钱关系没有，纯粹是依赖漂移——但它提醒你：**"测试跑不起来"和"测试失败"是两码事，前者往往是环境问题，别急着去改业务代码。**
+
+## 十、相关文件速查（第三次改造·硬化）
+- 改动集中在：`src/llmperf/benchmark/runner.py`（A1-A4、B2）、`src/llmperf/benchmark/__main__.py`（B1、B3、B4）
+- 新增/扩充测试：`tests/test_benchmark_runner.py`、`tests/test_benchmark_cli.py`、`tests/test_benchmark_metrics.py`（26 → 41 个测试函数）
+- 设计规格：`docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`
+- 实施计划 + 提交映射：`docs/superpowers/plans/2026-07-15-benchmark-production-hardening.md`
+- SDD 执行账本（事实来源）：`.superpowers/sdd/progress.md`

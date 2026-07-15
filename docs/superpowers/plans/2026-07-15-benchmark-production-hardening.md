@@ -1,6 +1,6 @@
 # benchmark 生产可用性硬化 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 在已完工的 `src/llmperf/benchmark/` 上叠加运行时正确性（A 簇）与健壮性边界（B 簇）硬化，使其从 happy-path 可跑推进到生产可用，不改架构、不改 JSON 输出结构。
 
@@ -9,6 +9,8 @@
 **Tech Stack:** Python 3.8–3.10、`litellm`（`acompletion`/`token_counter`）、`asyncio`、`pytest`（`monkeypatch`/`capsys`，无 `pytest-asyncio`）、`black`。
 
 **参考 spec:** `docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`（§3 A 簇、§4 B 簇、§5 测试矩阵、§6 影响面）。
+
+> **✅ 状态：全部完成（2026-07-15，SDD 子代理驱动执行）。** 提交映射：A1 `d6b2810`、A2 `c6f5a54`、A3 `dc0d397`、A4 `97ec1b0`、B1 `5990b0f`、B2 `ad5492d`(+`e1ad5e4` 强化测试)、B3 `8997faa`、B4 `6b8cfa5`。测试 26 → 41 个函数（pytest 43 例）。分支 base `65a70cb`。逐任务评审记录见 `.superpowers/sdd/progress.md`；Task 8 独立评审门因子代理连续 "Prompt is too long" 派发失败，已折叠进最终全分支评审。
 
 ## Global Constraints
 
@@ -33,7 +35,7 @@
 **Interfaces:**
 - Produces: `extract_content(delta: Any) -> Optional[str]` —— 从 litellm 流式 delta 取增量文本，兼容 `dict`（含子类，走 `.get`）与 pydantic 对象（走 `getattr`）；优先 `reasoning_content`，其次 `content`。后续 A2/A3/A4/B2 均在 A1 重写后的 `_single_request` 上继续修改。
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 在 `tests/test_benchmark_runner.py` 顶部 `_Delta` 类下方新增一个"只支持 getattr、不支持 .get"的对象桩，并追加四形态测试：
 
@@ -66,12 +68,12 @@ def test_extract_content_empty_returns_none():
     assert runner.extract_content(_ObjDelta()) is None
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_benchmark_runner.py -k extract_content -v`
 Expected: FAIL —— `AttributeError: module 'llmperf.benchmark.runner' has no attribute 'extract_content'`
 
-- [ ] **Step 3: Add `extract_content` + rewrite the collection loop**
+- [x] **Step 3: Add `extract_content` + rewrite the collection loop**
 
 在 `runner.py` 中，`_single_request` 定义之前（`from ... import` 之后）新增：
 
@@ -109,12 +111,12 @@ def extract_content(delta: Any) -> Optional[str]:
 
 （等价性：原 guard `content or reasoning_content` 触发 TTFT，追加时 `reasoning_content` 优先——新代码 `piece = reasoning or content` 完全一致。）
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_benchmark_runner.py -v`
 Expected: PASS —— 新 4 用例 + 既有 5 用例（`ttft_and_text`/`counts_reasoning_content`/`error_extracts`/`completes_bounded`/`concurrency_stays_at_n`）全绿。
 
-- [ ] **Step 5: Format & commit**
+- [x] **Step 5: Format & commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf && black . -q
@@ -136,7 +138,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Consumes: A1 重写后的 `_single_request`。
 - Produces: `_single_request` 契约收紧——**任何情况下都返回结果 dict，绝不外抛异常**；`token_counter` 抛错时该请求 `error_code` 非 `None`、`num_output_tokens == 0`。`run_benchmark` 因此不再被单点异常整体拖崩。
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 在 `tests/test_benchmark_runner.py` 追加：
 
@@ -176,12 +178,12 @@ def test_run_benchmark_keeps_results_when_token_counter_errors(monkeypatch):
     assert all(r[cm.ERROR_CODE] is not None for r in results)
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_benchmark_runner.py -k "token_counter" -v`
 Expected: FAIL —— `token_counter` 在 `try` 外，异常冒出：`test_single_request_survives...` 抛 `RuntimeError`（未被捕获），`test_run_benchmark_keeps_results...` 因 `asyncio.gather` 抛出而失败。
 
-- [ ] **Step 3: Move `token_counter` into the try block**
+- [x] **Step 3: Move `token_counter` into the try block**
 
 在 `_single_request` 中：
 
@@ -219,12 +221,12 @@ Expected: FAIL —— `token_counter` 在 `try` 外，异常冒出：`test_singl
 
 （`num_output_tokens` 现由 `try` 内赋值；异常路径下保持初始化的 `0`。）
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_benchmark_runner.py -v`
 Expected: PASS —— 新 2 用例 + 既有全绿。
 
-- [ ] **Step 5: Format & commit**
+- [x] **Step 5: Format & commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf && black . -q
@@ -246,7 +248,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Consumes: A2 后的 `_single_request`（token_counter 已在 `try` 内）。
 - Produces: 流正常结束但 `generated_text == ""` 时，`error_code = "empty_response"`。该请求被 `metrics.summarize` 按 `error_code is not None` 归为错误，不进入成功分位。
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 在 `tests/test_benchmark_runner.py` 追加：
 
@@ -285,12 +287,12 @@ def test_summarize_counts_empty_response_as_error():
 
 （`tests/test_benchmark_metrics.py` 顶部若尚未 `from llmperf import common_metrics as cm`，沿用该文件既有的 `cm` 导入；若无则加一行 `from llmperf import common_metrics as cm`。）
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_benchmark_runner.py::test_single_request_empty_stream_marked_failed tests/test_benchmark_metrics.py::test_summarize_counts_empty_response_as_error -v`
 Expected: FAIL —— runner 侧 `error_code` 为 `None`（≠ `"empty_response"`）；metrics 侧该请求被计入成功、`num_errors == 0`。
 
-- [ ] **Step 3: Add the empty-stream check**
+- [x] **Step 3: Add the empty-stream check**
 
 在 `_single_request` 的 `try` 内，`num_output_tokens = token_counter(...)` 之后追加：
 
@@ -301,12 +303,12 @@ Expected: FAIL —— runner 侧 `error_code` 为 `None`（≠ `"empty_response"
             error_code = "empty_response"
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_benchmark_runner.py tests/test_benchmark_metrics.py -v`
 Expected: PASS —— 新 2 用例 + 既有全绿（注意：既有 `test_single_request_ttft_and_text` 有非空 content，不受影响）。
 
-- [ ] **Step 5: Format & commit**
+- [x] **Step 5: Format & commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf && black . -q
@@ -328,7 +330,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Consumes: A2 后的 `except` 块。
 - Produces: `status_code == 0` 的异常 → `error_code == "0"`（而非 `"unknown"`）。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在 `tests/test_benchmark_runner.py` 追加：
 
@@ -343,12 +345,12 @@ def test_single_request_status_code_zero_not_swallowed(monkeypatch):
     assert m[cm.ERROR_CODE] == "0"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_benchmark_runner.py::test_single_request_status_code_zero_not_swallowed -v`
 Expected: FAIL —— `assert 'unknown' == '0'`（`0 or "unknown"` → `"unknown"`）。
 
-- [ ] **Step 3: Replace the `except` body**
+- [x] **Step 3: Replace the `except` body**
 
 把 `_single_request` 的 `except` 块：
 
@@ -367,12 +369,12 @@ Expected: FAIL —— `assert 'unknown' == '0'`（`0 or "unknown"` → `"unknown
         error_code = "unknown" if sc is None else str(sc)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_benchmark_runner.py -v`
 Expected: PASS —— 新用例通过，且既有 `test_single_request_error_extracts_from_exception`（`status_code=429` → `"429"`）不回退。
 
-- [ ] **Step 5: Format & commit**
+- [x] **Step 5: Format & commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf && black . -q
@@ -393,7 +395,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Interfaces:**
 - Produces: `parse_metadata(raw: str) -> Dict[str, str]`，遇不含 `=` 的项抛 `argparse.ArgumentTypeError`；`--metadata` 经 argparse 以退出码 2 友好报错。`main()` 中 `args.metadata` 自此为 `Dict`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在 `tests/test_benchmark_cli.py` 顶部补 `import argparse`，追加：
 
@@ -405,12 +407,12 @@ def test_parse_metadata_missing_equals_raises():
 
 （既有 `test_parse_metadata_splits_on_first_equals` 与 `test_parse_metadata_empty` 作为回归保留，不改。）
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_benchmark_cli.py::test_parse_metadata_missing_equals_raises -v`
 Expected: FAIL —— 当前 `"foo".split("=", 1)` 解包抛 `ValueError`（非 `ArgumentTypeError`）。
 
-- [ ] **Step 3: Harden `parse_metadata` and wire it into argparse**
+- [x] **Step 3: Harden `parse_metadata` and wire it into argparse**
 
 `__main__.py` 中把 `parse_metadata` 循环体改为带校验：
 
@@ -454,12 +456,12 @@ def parse_metadata(raw: str) -> Dict[str, str]:
 
 （即移除 `user_metadata = parse_metadata(args.metadata)` 这一行；`argparse` 已在文件顶部导入，无需新增 import。）
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_benchmark_cli.py -v`
 Expected: PASS —— 新用例 + 2 条回归（`splits_on_first_equals`/`empty`）全绿。
 
-- [ ] **Step 5: Format & commit**
+- [x] **Step 5: Format & commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf && black . -q
@@ -481,7 +483,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Consumes: A1–A4 后的 `_single_request` 与 `run_benchmark::worker`。
 - Produces: `_single_request(config, prompt_text, num_input_tokens, sampled_max_tokens, request_timeout: Optional[float] = None)`；`request_timeout is None` 时 `body["timeout"]` 回退 `config.timeout`（保持既有直接调用兼容），否则用传入值。`worker` 每次调用前传 `max(0.0, config.timeout - elapsed)`，使任何单请求 HTTP 超时不越过全局 deadline。
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 在 `tests/test_benchmark_runner.py` 追加一个能捕获 `body` 的假 acompletion 与两条断言：
 
@@ -535,12 +537,12 @@ def test_worker_passes_remaining_budget_not_full_timeout(monkeypatch):
     assert captured["timeout"] > 0
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_benchmark_runner.py -k "request_timeout or remaining_budget" -v`
 Expected: FAIL —— `test_single_request_passes_explicit_request_timeout` 抛 `TypeError`（`_single_request` 尚不接受第 5 个参数）。
 
-- [ ] **Step 3: Add the optional param and derive remaining budget in worker**
+- [x] **Step 3: Add the optional param and derive remaining budget in worker**
 
 修改 `_single_request` 签名，增加末位可选参：
 
@@ -590,12 +592,12 @@ async def _single_request(
 
 （因未 break 即 `elapsed < config.timeout`，故 `request_timeout > 0`。）
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_benchmark_runner.py -v`
 Expected: PASS —— 新 2 用例 + 既有全绿（既有 3 个直接调用 `_single_request(..., 50)` 的用例因 `request_timeout` 有默认值 `None` 而不受影响）。
 
-- [ ] **Step 5: Format & commit**
+- [x] **Step 5: Format & commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf && black . -q
@@ -617,7 +619,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Consumes: B1 后的 `args.metadata`（`Dict`）。
 - Produces: 用户 metadata 键与内建键（`model`/`num_concurrent_requests`/`timestamp`/`litellm_version` 等）冲突时**跳过并向 stderr 打 warning**，内建键永不被覆盖；非冲突键正常写入。JSON 结构不变。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在 `tests/test_benchmark_cli.py` 追加（monkeypatch 掉 `run_benchmark` 避免网络；`summarize` 用真实实现）：
 
@@ -648,12 +650,12 @@ def test_metadata_does_not_override_builtin_keys(monkeypatch, capsys):
 
 （`tests/test_benchmark_cli.py` 顶部补 `import json`。）
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_benchmark_cli.py::test_metadata_does_not_override_builtin_keys -v`
 Expected: FAIL —— 当前 `summary.update(user_metadata)` 使 `summary["model"] == "fake"`，断言 `== "real-model"` 失败。
 
-- [ ] **Step 3: Replace unconditional update with per-key merge**
+- [x] **Step 3: Replace unconditional update with per-key merge**
 
 `__main__.py` 顶部 import 区新增：
 
@@ -681,12 +683,12 @@ import sys
         summary[k] = v
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_benchmark_cli.py -v`
 Expected: PASS —— 新用例 + 既有全绿。
 
-- [ ] **Step 5: Format & commit**
+- [x] **Step 5: Format & commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf && black . -q
@@ -708,7 +710,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Consumes: B1 后的 `_build_parser()` / `args`。
 - Produces: `num_concurrent_requests < 1` / `max_num_completed_requests < 1` / `timeout <= 0` 任一触发 → `parser.error(...)` → `SystemExit(2)` + 友好信息，不再静默产空报告。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在 `tests/test_benchmark_cli.py` 追加：
 
@@ -727,12 +729,12 @@ def test_main_rejects_non_positive_numeric_args(bad_args):
     assert exc.value.code == 2  # parser.error 退出码
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_benchmark_cli.py::test_main_rejects_non_positive_numeric_args -v`
 Expected: FAIL —— 无校验时 `main` 会带非法值进入 `asyncio.run(run_benchmark(...))`（`num_concurrent=0` → 0 个 worker → 空结果返回，不抛 `SystemExit`），测试 `pytest.raises(SystemExit)` 失败。
 
-- [ ] **Step 3: Add sanity validation in `main`**
+- [x] **Step 3: Add sanity validation in `main`**
 
 在 `main()` 中，`parser = _build_parser()` 拿到 parser 后、组装 `config` 之前插入校验。将开头两行
 
@@ -758,12 +760,12 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 （`parser.error` 内部 `sys.exit(2)`；`SystemExit` 由 argparse 抛出。）
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_benchmark_cli.py -v`
 Expected: PASS —— 三参数化用例 + 既有全绿。
 
-- [ ] **Step 5: Run full suite & commit**
+- [x] **Step 5: Run full suite & commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf && black . -q
@@ -786,23 +788,23 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 （纯文档同步，无测试步骤；文档更新前先 `Read` 目标文件核对现状——遵循"先读后写"。）
 
-- [ ] **Step 1: 更新 `src/llmperf/benchmark/CLAUDE.md`**
+- [x] **Step 1: 更新 `src/llmperf/benchmark/CLAUDE.md`**
 
 - 测试矩阵表：runner 用例 5→约 12、cli 用例 4→约 8，总数 26→约 34+。
 - `runner.py` 接口段补 `extract_content(delta)` 纯函数与"防御式提取兼容 pydantic 对象"说明；`_single_request` 补 `request_timeout: Optional[float]=None`（剩余预算派生）。
 - FAQ 或口径段新增：**空流 → `empty_response` 失败**（有意语义收紧）；**单请求 timeout = 剩余全局预算**（最坏 wall clock 从 ~2× 压回 ~1×）。
 - Changelog 追加一条 2026-07-15 记录。
 
-- [ ] **Step 2: 更新 `docs/benchmark.md`**
+- [x] **Step 2: 更新 `docs/benchmark.md`**
 
 - 新增/更新"行为语义"小节：空流判失败、timeout 剩余预算、`--metadata` 内建键优先 + warning、`num_concurrent`/`max_num`/`timeout` 非正数拒绝（退出码 2）。
 
-- [ ] **Step 3: 回填 spec 与 plan 状态**
+- [x] **Step 3: 回填 spec 与 plan 状态**
 
 - spec §7 或文末标注"已实施完成，见 plan 2026-07-15"。
 - 本 plan 全部 checkbox 勾选。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd /Users/gecanhui/github_thinker007/llmperf

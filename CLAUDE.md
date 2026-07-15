@@ -11,7 +11,7 @@
 项目由两条并行的技术路线组成：
 
 1. **成熟的 Ray 压测路线**（`token_benchmark_ray.py` + `llm_correctness.py` + `src/llmperf/`）：以 Ray Actor 作为并发原语，`RequestsLauncher` 通过 `ActorPool` 派发请求，多线程（`threading.Thread`）驱动多个 Actor 池并行工作，使用固定的 Llama 分词器保证跨模型 token 计数口径一致。这是当前**唯一可用、可跑通**的压测入口。
-2. **轻量 asyncio 压测路线**（`src/llmperf/benchmark/`）：用 `asyncio` worker-pool 直接压 `litellm.acompletion()`，去掉 Ray/threading/pandas/transformers 等重脚手架，与 Ray 路线并存、零侵入。**已完工**（26 个测试全绿），`python -m llmperf.benchmark` 是可用的 CLI 入口。完整设计见 `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`、实施计划见对应 plan 文档、用户文档见 `docs/benchmark.md`。
+2. **轻量 asyncio 压测路线**（`src/llmperf/benchmark/`）：用 `asyncio` worker-pool 直接压 `litellm.acompletion()`，去掉 Ray/threading/pandas/transformers 等重脚手架，与 Ray 路线并存、零侵入。**已完工，并于 2026-07-15 完成一轮生产可用性硬化**（A1-A4 运行期正确性 + B1-B4 健壮性边界，41 个测试函数 / pytest 43 例全绿），`python -m llmperf.benchmark` 是可用的 CLI 入口。完整设计见 `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`（原始）与 `.../2026-07-15-benchmark-production-hardening-design.md`（硬化）、实施计划见对应 plan 文档、用户文档见 `docs/benchmark.md`。
 
 两条路线共享同一套指标常量命名（`src/llmperf/common_metrics.py`），但**指标口径不完全一致**（尤其是 Inter-Token Latency 的计算公式在新路线里被有意修正，`metrics.py` 中已实际生效，见 `src/llmperf/benchmark/CLAUDE.md`），使用时注意不要跨路线直接对比数字。
 
@@ -38,7 +38,7 @@ graph TD
 |---|---|---|---|
 | `src/llmperf` | 核心框架：`RequestConfig` 数据模型、指标常量、`LLMClient` 抽象接口、`RequestsLauncher` 调度、`utils.py` 工具函数；以及紧密耦合的两个入口脚本 `token_benchmark_ray.py`（性能压测）与 `llm_correctness.py`（正确性校验，位于仓库根目录） | Python | [详见](./src/llmperf/CLAUDE.md) |
 | `src/llmperf/ray_clients` | 5 个 Ray Actor 客户端：OpenAI / Anthropic（原生）/ LiteLLM（万能兜底）/ SageMaker / VertexAI | Python | [详见](./src/llmperf/ray_clients/CLAUDE.md) |
-| `src/llmperf/benchmark` | 轻量 asyncio 压测子模块，**已完工**：prompt 采样、指标聚合、worker-pool 并发引擎、CLI 全部就绪，26 个测试全绿 | Python | [详见](./src/llmperf/benchmark/CLAUDE.md) |
+| `src/llmperf/benchmark` | 轻量 asyncio 压测子模块，**已完工 + 生产可用性硬化**：prompt 采样、指标聚合、worker-pool 并发引擎、CLI 全部就绪，A/B 两簇 8 项硬化落地，41 个测试函数（pytest 43 例）全绿 | Python | [详见](./src/llmperf/benchmark/CLAUDE.md) |
 | `tests` | pytest 单元测试，均为纯函数级测试（不连真实网络、不起 Ray） | Python | [详见](./tests/CLAUDE.md) |
 | `docs/superpowers` | `benchmark` 子模块的设计规划文档（Markdown 计划书 + 设计规格），非代码 | Markdown | 不生成独立模块 CLAUDE.md，理由见下 |
 | `.traces` | 运行期产生的 trace 日志（`.jsonl`/`.log`/`.html`） | - | 运行期产物，不生成文档 |
@@ -106,12 +106,13 @@ python -m pytest tests/ -v
 ## AI 使用指引
 
 - 修改任意客户端前，先读 `src/llmperf/ray_llm_client.py` 理解统一接口契约（`llm_request` 必须返回三元组）。
-- `src/llmperf/benchmark/` 已完工（5 个 Task 全部完成，26 个测试全绿）。继续扩展前先读设计规格 `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`，理解已评审 6 轮的设计决策（尤其是 §4.2 的 worker-pool 并发模型，明确禁止用 `asyncio.gather` 批处理，因为历史上 Ray 版本因批处理语义踩过 #59 bug——这条约束在 `runner.py` 中已落地生效）。
+- `src/llmperf/benchmark/` 已完工并硬化（原始 5 个 Task + 2026-07-15 硬化 8 项，41 个测试函数 / pytest 43 例）。继续扩展前先读设计规格 `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`（原始）与 `.../2026-07-15-benchmark-production-hardening-design.md`（硬化），理解已评审 6 轮的设计决策（尤其是 §4.2 的 worker-pool 并发模型，明确禁止用 `asyncio.gather` 批处理，因为历史上 Ray 版本因批处理语义踩过 #59 bug——这条约束在 `runner.py` 中已落地生效）。**注意本轮两处语义变更**：空流改判 `empty_response` 错误、单请求超时改为剩余预算，详见 `src/llmperf/benchmark/CLAUDE.md`。
 - 涉及"指标口径"的改动（TTFT/ITL/吞吐 的计算公式）务必谨慎，两条压测路线口径已知不一致，改动前先确认改的是哪条路线。
 - `.claude/FOR_thinkerisme.md` 是面向项目所有者的可读性导读文档，包含大量本次 Anthropic 客户端改造的背景故事和踩坑记录，与本文件（面向 AI 架构索引）互补，不要相互覆盖。
 
 ## 变更记录 (Changelog)
 
+- 2026-07-15（benchmark 生产可用性硬化 A+B）：在 `src/llmperf/benchmark/` 上叠加 8 项硬化（SDD 子代理驱动，逐任务评审）。A 簇运行期正确性：A1 防御式 `extract_content`、A2 `_single_request` 异常绝不逃逸、A3 空流判 `empty_response`、A4 保留 `status_code==0`；B 簇健壮性边界：B1 `--metadata` 缺 `=` 友好报错、B2 单请求超时=剩余预算、B3 内建汇总键优先于 `--metadata`、B4 数值参数非正值以退出码 2 拒绝。测试 26 → 41 个函数（pytest 43 例）。同步更新根/子模块 CLAUDE.md、`docs/benchmark.md`、spec/plan 状态。设计规格 `docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`、计划 `.../plans/2026-07-15-benchmark-production-hardening.md`。**两处有意语义变更**（A3 空流、B2 超时），跨路线对比数字时注意。
 - 2026-07-05（第三次扫描）：`src/llmperf/benchmark/` 完工——`runner.py`（asyncio worker-pool 并发引擎，修正原代码错误吞噬 bug）、`__main__.py`/`__init__.py`（CLI 入口）全部落地，加上 `docs/benchmark.md` 用户文档，5 个 Task、26 个测试全绿。同时修复了从 `utils.py` 移植时带过来的一个既有死循环 bug（`prompts.py::sample_prompt` 在 `stddev=0` 且 `mean` 小于基底前缀长度时会挂死，测试运行时才被发现）。计划文档 checkbox 已回填。
 - 2026-07-05（第二次扫描）：核实发现 `src/llmperf/benchmark/metrics.py` 与 `tests/test_benchmark_metrics.py` 已实际存在（此前记录为"未创建"），更新架构总览、模块索引表与 AI 使用指引中的相关措辞；确认 `src/llmperf/ray_clients/CLAUDE.md`、`src/llmperf/benchmark/CLAUDE.md`、`tests/CLAUDE.md`、`.claude/index.json` 均已存在并已增量更新（详见各自文件的变更记录）。
 - 2026-07-05（首次扫描）：首次执行自适应初始化架构扫描，生成根级与各模块 `CLAUDE.md`、`.claude/index.json`。

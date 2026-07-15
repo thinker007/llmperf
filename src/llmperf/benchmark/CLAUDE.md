@@ -2,7 +2,9 @@
 
 ## 模块职责
 
-**本模块已完工（计划 Task 1-5 全部完成，26 个测试全绿）。** `python -m llmperf.benchmark` 是可用的 CLI 入口。
+**本模块已完工，并于 2026-07-15 完成一轮"生产可用性硬化"迭代（A1-A4 运行期正确性 + B1-B4 健壮性边界，41 个测试函数 / pytest 展开 43 例全绿）。** `python -m llmperf.benchmark` 是可用的 CLI 入口。
+
+> 硬化迭代的设计规格见 `docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`、实施计划见 `docs/superpowers/plans/2026-07-15-benchmark-production-hardening.md`。本轮引入两处**有意的语义变更**：(A3) 空流从"成功"改判为 `empty_response` 错误；(B2) 单请求 HTTP 超时从"固定 `config.timeout`"改为"剩余预算 `config.timeout − 已用时`"。
 
 在不引入 Ray/threading/pandas/transformers 的前提下，用 `asyncio` worker-pool 直接压测 `litellm.acompletion()`，保留 `token_benchmark_ray.py` 的度量灵魂（TTFT/ITL/E2E/吞吐/错误率），与旧的 Ray 压测路线**并存、零侵入**（不 import、不修改旧代码）。核心动机是"压测 LLM 是 I/O 密集型任务，Ray 的多进程并行毫无必要，asyncio 能更省更快地完成同一调度职责"。
 
@@ -22,9 +24,9 @@
 | `src/llmperf/benchmark/runner.py` | **已完成**（Task 3） |
 | `src/llmperf/benchmark/__main__.py` | **已完成**（Task 4） |
 | `tests/test_benchmark_prompts.py` | **已完成** — 4 用例 |
-| `tests/test_benchmark_metrics.py` | **已完成** — 13 用例 |
-| `tests/test_benchmark_runner.py` | **已完成** — 5 用例 |
-| `tests/test_benchmark_cli.py` | **已完成** — 4 用例 |
+| `tests/test_benchmark_metrics.py` | **已完成** — 14 用例（+A3 空流） |
+| `tests/test_benchmark_runner.py` | **已完成** — 16 用例（+A1/A2/A4/B2 硬化） |
+| `tests/test_benchmark_cli.py` | **已完成** — 7 用例（+B1/B3/B4 硬化） |
 | `docs/benchmark.md` | **已完成**（Task 5） |
 
 ## 入口与启动
@@ -75,20 +77,30 @@ def _safe_quantiles(data: List[float]) -> Dict[str, Optional[float]]
                                     # num_concurrent_requests=10, max_num_completed_requests=10,
                                     # timeout=90, additional_sampling_params={}
 async def run_benchmark(config: BenchmarkConfig) -> Tuple[List[Dict[str, Any]], float]
-async def _single_request(config, prompt_text, num_input_tokens, sampled_max_tokens) -> Dict[str, Any]
+async def _single_request(config, prompt_text, num_input_tokens, sampled_max_tokens,
+                          request_timeout: Optional[float] = None) -> Dict[str, Any]
+# 纯函数，可直接单测（A1 防御式提取）：
+def _get(delta: Any, key: str) -> Optional[str]          # dict 用 .get，pydantic 对象用 getattr
+def extract_content(delta: Any) -> Optional[str]         # reasoning_content or content，任一缺失/异型都不炸
 ```
 - **并发模型：worker-pool，钉死不用 `gather` 批处理**。`run_benchmark` 预生成恰好 `max_num_completed_requests` 条 prompt 放进有界 `asyncio.Queue`，`num_concurrent_requests` 个常驻协程各自死循环 `queue.get_nowait()` 取任务，任一请求完成立刻取下一个。这直接避免了旧 Ray 路线历史上真实踩过的 `#59` bug（commit `f1d6bed`）——"凑够一批再一起等"的语义下，在途请求数会从 N 塌陷到 1 再回弹，拖慢吞吐。`tests/test_benchmark_runner.py::test_run_benchmark_concurrency_stays_at_n` 专门验证"队列有货时持续保持 == N"（不只是"峰值 ≤ N"这种弱断言）。
-- `--timeout` 到点后 worker 停止取新任务，但不 cancel 在途请求，等其自然完成后计入统计；同时给 `acompletion` 透传 HTTP 层 `timeout=config.timeout` 兜底，防止单个永久 hang 的请求让 `gather` 永不返回。
-- `_single_request` 的流式采集骨架照搬 `ray_clients/litellm_client.py:61-103`（只把同步 `for` 换成 `async for`），但**修正**了原代码的错误吞噬 bug：`except Exception as e` 里从 `e` 真实提取 `error_msg`/`error_code`（`str(getattr(e, "status_code", None) or "unknown")`），而不是原代码写死的常量。
-- `reasoning_content`（推理模型的思维链）与 `content` 都计入 `generated_text` 和 TTFT 判定——对应仓库历史上 `80a6566` 修的"流式下没提取 reasoning_content 导致 TTFT 算错"那个坑，这里从一开始就做对。
+- **`--timeout` 与单请求超时（B2 硬化）**：`--timeout` 到点后 worker 停止取新任务，但不 cancel 在途请求，等其自然完成后计入统计。给 `acompletion` 透传的 HTTP 层 `timeout` **不再是固定的 `config.timeout`**，而是 worker 每次取任务前算出的**剩余预算** `max(0.0, config.timeout − elapsed)`（`elapsed` 由单次 `time.monotonic()` 采样得出）。这样单个慢请求最多拖到整体预算耗尽，而不是在预算末尾还能再独占一整个 `config.timeout`。`_single_request` 的 `request_timeout` 参数为 `None` 时回退到 `config.timeout`（保持库直调时的旧行为）。守护测试：`test_worker_derives_shrinking_budget`（monotonic 前进 → 断言 `0 < 透传 timeout < config.timeout`，能抓住"退回固定 config.timeout"的回归）。
+- **`_single_request` 绝不让异常逃逸（A2 硬化）**：流式采集骨架照搬 `ray_clients/litellm_client.py:61-103`（只把同步 `for` 换成 `async for`），整个请求生命周期包在 `try/except Exception as e` 内，`num_output_tokens`/`token_counter` 计费也移进 `try`——任何环节抛错都被就地转成一条带 `error_code`/`error_msg` 的 result dict 返回，**不会**冒泡到 worker 协程把整个池带崩。
+- **错误码从异常真实提取，且保留 `status_code == 0`（A4 硬化）**：`sc = getattr(e, "status_code", None); error_code = "unknown" if sc is None else str(sc)`。原代码写的是 `sc or "unknown"`，会把合法的 `status_code == 0` 误吞成 `"unknown"`——已修正为只在 `None` 时才落 `"unknown"`。
+- **空流判为失败（A3 硬化，语义变更）**：请求成功返回但 `generated_text == ""`（模型没吐任何 token）时，`error_code` 置为 `"empty_response"`。此前这类请求被计为成功、污染分位数统计。`metrics.summarize` 因此会把它计入 `number_errors` / `error_code_frequency`。
+- **`reasoning_content` 与 `content` 都计入（A1 硬化）**：推理模型的思维链与正文都进 `generated_text` 和 TTFT 判定——对应仓库历史上 `80a6566` 修的"流式下没提取 reasoning_content 导致 TTFT 算错"那个坑。本轮把这段抽成纯函数 `extract_content(delta)`（内部 `_get` 兼容 delta 是 dict 还是 pydantic 对象两种形态），既做对又可脱离网络直接单测四种 delta 形态。
 
 ### `__main__.py` / `__init__.py`
 ```python
 def parse_metadata(raw: str) -> Dict[str, str]      # "a=1,b=x=y" → {"a":"1","b":"x=y"}；split("=",1)，重复 key 后覆盖
 def clean_filename(model: str, mean_input: int, mean_output: int) -> str  # 照搬 token_benchmark_ray.py 的两步正则清洗
+def _build_parser() -> argparse.ArgumentParser      # 建 parser（B4 后抽出，便于拿到 parser 引用调 parser.error）
 def main(argv: Optional[List[str]] = None) -> None
 ```
 - CLI 参数与旧 Ray 版对齐（降低迁移成本），`--additional-sampling-params` 用 `type=json.loads`，非法 JSON 由 argparse 直接报错退出（`SystemExit`），不需要手写校验。
+- **`--metadata` 缺 `=` 时友好报错（B1 硬化）**：`parse_metadata` 现直接作为 `type=` 回调挂到 argparse 上（`type=parse_metadata, default={}`）；某项不含 `=` 时抛 `argparse.ArgumentTypeError("metadata item '...' must be key=value")`，由 argparse 打印 usage 并以退出码 2 退出，而不是过去那样静默产生怪异结果。
+- **内建汇总字段优先于 `--metadata`（B3 硬化）**：拼装 `summary` 时，`model`/`num_concurrent_requests`/`timestamp`/`litellm_version` 等内建键**永不被 `--metadata` 覆盖**；用户 metadata 若与内建键撞名，跳过写入并向 `sys.stderr` 打印 `warning: metadata key '...' conflicts with a built-in field and was ignored`，非冲突键正常写入。
+- **数值参数下限校验（B4 硬化）**：`parse_args` 后三道 `parser.error(...)` 卫语句——`--num-concurrent-requests < 1`、`--max-num-completed-requests < 1`、`--timeout <= 0` 任一命中即以退出码 2 退出。此前 0 或负值会导致空队列/无 worker，跑出一份全 `None` 统计的空报告而不报错。
 - `__init__.py` 导出 `run_benchmark`/`summarize`/`BenchmarkConfig`，可作为库直接 `from llmperf.benchmark import ...` 使用而不经过 CLI。
 
 ## 关键依赖与配置
@@ -123,16 +135,18 @@ run_benchmark(config) -> (results: List[Dict], wall_clock_s: float)
 - **Inter-Token Latency**：旧版 `token_benchmark_ray.py` 用 `sum(time_to_next_token) / chunk数`（首项混入 TTFT，分母是 chunk 数而非 token 数，语义不纯净）；本模块用 `(E2E_LAT - TTFT) / (NUM_OUTPUT_TOKENS - 1)`（`NUM_OUTPUT_TOKENS <= 1` 时为 0）。**两条路线的 ITL 数值不可直接比较**，`docs/benchmark.md` 用 ⚠️ 标出。修改这个公式前先读设计规格 §7 决策 2。
 - **并发模型**：旧版"派发一批 N 个再一起等"（历史上因此产生过 #59 并发数塌陷 bug）；本模块钉死用 worker-pool，在途请求数稳定等于 N。
 
+**错误分类（2026-07-15 硬化后）**：单请求 `error_code` 取值口径——异常路径取 `str(e.status_code)`（含合法的 `"0"`，仅 `None` 时落 `"unknown"`，A4）；成功返回但零 token 的空流落 `"empty_response"`（A3，语义变更：此前计为成功）。这两类都会被 `summarize` 计入 `number_errors` / `error_code_frequency`。
+
 ## 测试与质量
 
 | 测试文件 | 用例数 | 覆盖点 |
 |---|---|---|
 | `tests/test_benchmark_prompts.py` | 4 | 高斯重采样必为正数、`sample_output_len` 恒正、`sample_prompt` 口径自洽、小均值场景下的收敛性（含 `stddev=0` 边界，曾在实现时触发死循环 bug） |
-| `tests/test_benchmark_metrics.py` | 13 | 换算正确性、`_safe_div`/`_safe_stdev`/`_safe_quantiles` 全部除零与 n<2 边界、`summarize` 成功/失败分流、全失败场景、`wall_clock_s==0`、`error_code` 类型归一为 `str` |
-| `tests/test_benchmark_runner.py` | 5 | TTFT/文本采集、`reasoning_content` 计入、错误从异常真实提取、有界队列软上限、**worker-pool 并发稳定性**（峰值==N 且持续保持==N，不塌陷） |
-| `tests/test_benchmark_cli.py` | 4 | `--metadata` 解析（`split("=",1)`、重复 key 覆盖）、文件名清洗、非法 JSON 报错退出 |
+| `tests/test_benchmark_metrics.py` | 14 | 换算正确性、`_safe_div`/`_safe_stdev`/`_safe_quantiles` 全部除零与 n<2 边界、`summarize` 成功/失败分流、全失败场景、`wall_clock_s==0`、`error_code` 类型归一为 `str`、**空流计为 `empty_response` 错误（A3）** |
+| `tests/test_benchmark_runner.py` | 16 | TTFT/文本采集、**`extract_content` 四种 delta 形态（A1）**、`reasoning_content` 计入、错误从异常真实提取、**异常绝不逃逸（A2）**、**`status_code==0` 保留（A4）**、有界队列软上限、**worker-pool 并发稳定性**（峰值==N 且持续保持==N，不塌陷）、**单请求超时=剩余预算且随耗时收缩（B2）** |
+| `tests/test_benchmark_cli.py` | 7 | `--metadata` 解析（`split("=",1)`、重复 key 覆盖）、**缺 `=` 抛 `ArgumentTypeError`（B1）**、文件名清洗、非法 JSON 报错退出、**内建键不被 metadata 覆盖并告警（B3）**、**非正数值参数以退出码 2 拒绝（B4，参数化 ×3）** |
 
-全部 26 个用例无需网络（`prompts`/`metrics` 是纯函数；`runner`/`cli` 用 `monkeypatch` 注入假的 `acompletion`/`token_counter`）。运行：
+全部 41 个测试函数（pytest 展开 43 例）无需网络（`prompts`/`metrics` 是纯函数；`runner`/`cli` 用 `monkeypatch` 注入假的 `acompletion`/`token_counter`）。运行：
 ```bash
 python -m pytest tests/test_benchmark_prompts.py tests/test_benchmark_metrics.py tests/test_benchmark_runner.py tests/test_benchmark_cli.py -v
 ```
@@ -167,6 +181,7 @@ python -m pytest tests/test_benchmark_prompts.py tests/test_benchmark_metrics.py
 
 ## 变更记录 (Changelog)
 
+- 2026-07-15（生产可用性硬化 A+B）：完成 8 项硬化 + 文档同步（SDD 子代理驱动）。**A 簇 运行期正确性**：A1 抽出防御式 `extract_content`（兼容 dict/pydantic delta）；A2 `_single_request` 全生命周期包 try，异常绝不逃逸出 worker 池；A3 空流改判为 `empty_response` 错误（语义变更）；A4 保留合法 `status_code==0` 不再误吞为 `"unknown"`。**B 簇 健壮性边界**：B1 `--metadata` 缺 `=` 走 argparse 友好报错（退出码 2）；B2 单请求 HTTP 超时改为剩余预算 `config.timeout − elapsed`（语义变更，含强断言守护测试）；B3 内建汇总键优先于 `--metadata`、撞名跳过并 stderr 告警；B4 `--num-concurrent-requests`/`--max-num-completed-requests`/`--timeout` 非正值以退出码 2 拒绝。测试 26 → 41 个函数（pytest 43 例）。仅两处语义变更（A3、B2）跨路线对比时需注意。
 - 2026-07-05：Task 3（`runner.py`）、Task 4（`__main__.py`/`__init__.py`）、Task 5（`docs/benchmark.md`）全部完成，26 个测试全绿，模块正式完工。记录 `prompts.py` 的 `stddev==0` 死循环 bug 修复。
 - 2026-07-05（第二次扫描）：核实 `metrics.py` 与 `tests/test_benchmark_metrics.py` 已完成。
 - 2026-07-05（首次扫描）：首次生成本模块文档，标注当时为半成品状态（仅 Task 1 完成）。
