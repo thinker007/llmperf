@@ -2,7 +2,7 @@
 
 ## 模块职责
 
-**本模块已完工，并于 2026-07-15 完成一轮"生产可用性硬化"迭代（A1-A4 运行期正确性 + B1-B4 健壮性边界，41 个测试函数 / pytest 展开 43 例全绿）。** `python -m llmperf.benchmark` 是可用的 CLI 入口。
+**本模块已完工，并于 2026-07-15 完成一轮"生产可用性硬化"迭代（A1-A4 运行期正确性 + B1-B4 健壮性边界，43 个测试函数 / pytest 展开 48 例全绿）。** `python -m llmperf.benchmark` 是可用的 CLI 入口。
 
 > 硬化迭代的设计规格见 `docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`、实施计划见 `docs/superpowers/plans/2026-07-15-benchmark-production-hardening.md`。本轮引入两处**有意的语义变更**：(A3) 空流从"成功"改判为 `empty_response` 错误；(B2) 单请求 HTTP 超时从"固定 `config.timeout`"改为"剩余预算 `config.timeout − 已用时`"。
 
@@ -25,8 +25,8 @@
 | `src/llmperf/benchmark/__main__.py` | **已完成**（Task 4） |
 | `tests/test_benchmark_prompts.py` | **已完成** — 4 用例 |
 | `tests/test_benchmark_metrics.py` | **已完成** — 14 用例（+A3 空流） |
-| `tests/test_benchmark_runner.py` | **已完成** — 16 用例（+A1/A2/A4/B2 硬化） |
-| `tests/test_benchmark_cli.py` | **已完成** — 7 用例（+B1/B3/B4 硬化） |
+| `tests/test_benchmark_runner.py` | **已完成** — 17 用例（+A1/A2/A4/B2 硬化 + 非 dict 采样参数不逃逸） |
+| `tests/test_benchmark_cli.py` | **已完成** — 8 用例（+B1/B3/B4 硬化 + 采样参数非对象退出） |
 | `docs/benchmark.md` | **已完成**（Task 5） |
 
 ## 入口与启动
@@ -97,7 +97,7 @@ def clean_filename(model: str, mean_input: int, mean_output: int) -> str  # 照�
 def _build_parser() -> argparse.ArgumentParser      # 建 parser（B4 后抽出，便于拿到 parser 引用调 parser.error）
 def main(argv: Optional[List[str]] = None) -> None
 ```
-- CLI 参数与旧 Ray 版对齐（降低迁移成本），`--additional-sampling-params` 用 `type=json.loads`，非法 JSON 由 argparse 直接报错退出（`SystemExit`），不需要手写校验。
+- CLI 参数与旧 Ray 版对齐（降低迁移成本）。`--additional-sampling-params` 用 `type=parse_json_dict`：非法 JSON（`json.loads` 抛 `ValueError`）与合法但非对象（list/int/str/bool，抛 `ArgumentTypeError`）都由 argparse 友好报错并以退出码 2 退出——后者是评审 finding #1 的收口，防止非 dict 值流到 `runner.body.update()` 抛 `TypeError` 崩掉整个压测池。运行时 `_single_request` 内另有一层兜底（`body.update` 已移进 `try`），保护绕过 CLI、直接构造 `BenchmarkConfig` 的库调用方。
 - **`--metadata` 缺 `=` 时友好报错（B1 硬化）**：`parse_metadata` 现直接作为 `type=` 回调挂到 argparse 上（`type=parse_metadata, default={}`）；某项不含 `=` 时抛 `argparse.ArgumentTypeError("metadata item '...' must be key=value")`，由 argparse 打印 usage 并以退出码 2 退出，而不是过去那样静默产生怪异结果。
 - **内建汇总字段优先于 `--metadata`（B3 硬化）**：拼装 `summary` 时，`model`/`num_concurrent_requests`/`timestamp`/`litellm_version` 等内建键**永不被 `--metadata` 覆盖**；用户 metadata 若与内建键撞名，跳过写入并向 `sys.stderr` 打印 `warning: metadata key '...' conflicts with a built-in field and was ignored`，非冲突键正常写入。
 - **数值参数下限校验（B4 硬化）**：`parse_args` 后三道 `parser.error(...)` 卫语句——`--num-concurrent-requests < 1`、`--max-num-completed-requests < 1`、`--timeout <= 0` 任一命中即以退出码 2 退出。此前 0 或负值会导致空队列/无 worker，跑出一份全 `None` 统计的空报告而不报错。
@@ -143,10 +143,10 @@ run_benchmark(config) -> (results: List[Dict], wall_clock_s: float)
 |---|---|---|
 | `tests/test_benchmark_prompts.py` | 4 | 高斯重采样必为正数、`sample_output_len` 恒正、`sample_prompt` 口径自洽、小均值场景下的收敛性（含 `stddev=0` 边界，曾在实现时触发死循环 bug） |
 | `tests/test_benchmark_metrics.py` | 14 | 换算正确性、`_safe_div`/`_safe_stdev`/`_safe_quantiles` 全部除零与 n<2 边界、`summarize` 成功/失败分流、全失败场景、`wall_clock_s==0`、`error_code` 类型归一为 `str`、**空流计为 `empty_response` 错误（A3）** |
-| `tests/test_benchmark_runner.py` | 16 | TTFT/文本采集、**`extract_content` 四种 delta 形态（A1）**、`reasoning_content` 计入、错误从异常真实提取、**异常绝不逃逸（A2）**、**`status_code==0` 保留（A4）**、有界队列软上限、**worker-pool 并发稳定性**（峰值==N 且持续保持==N，不塌陷）、**单请求超时=剩余预算且随耗时收缩（B2）** |
-| `tests/test_benchmark_cli.py` | 7 | `--metadata` 解析（`split("=",1)`、重复 key 覆盖）、**缺 `=` 抛 `ArgumentTypeError`（B1）**、文件名清洗、非法 JSON 报错退出、**内建键不被 metadata 覆盖并告警（B3）**、**非正数值参数以退出码 2 拒绝（B4，参数化 ×3）** |
+| `tests/test_benchmark_runner.py` | 17 | TTFT/文本采集、**`extract_content` 四种 delta 形态（A1）**、`reasoning_content` 计入、错误从异常真实提取、**异常绝不逃逸（A2）**、**`status_code==0` 保留（A4）**、有界队列软上限、**worker-pool 并发稳定性**（峰值==N 且持续保持==N，不塌陷）、**单请求超时=剩余预算且随耗时收缩（B2）**、**库直调非 dict 采样参数转失败记录不逃逸（评审 finding #1）** |
+| `tests/test_benchmark_cli.py` | 8 | `--metadata` 解析（`split("=",1)`、重复 key 覆盖）、**缺 `=` 抛 `ArgumentTypeError`（B1）**、文件名清洗、非法 JSON 报错退出、**内建键不被 metadata 覆盖并告警（B3）**、**非正数值参数以退出码 2 拒绝（B4，参数化 ×3）**、**`--additional-sampling-params` 合法 JSON 但非对象以退出码 2 拒绝（参数化 ×4，评审 finding #1）** |
 
-全部 41 个测试函数（pytest 展开 43 例）无需网络（`prompts`/`metrics` 是纯函数；`runner`/`cli` 用 `monkeypatch` 注入假的 `acompletion`/`token_counter`）。运行：
+全部 43 个测试函数（pytest 展开 48 例）无需网络（`prompts`/`metrics` 是纯函数；`runner`/`cli` 用 `monkeypatch` 注入假的 `acompletion`/`token_counter`）。运行：
 ```bash
 python -m pytest tests/test_benchmark_prompts.py tests/test_benchmark_metrics.py tests/test_benchmark_runner.py tests/test_benchmark_cli.py -v
 ```
@@ -181,7 +181,8 @@ python -m pytest tests/test_benchmark_prompts.py tests/test_benchmark_metrics.py
 
 ## 变更记录 (Changelog)
 
-- 2026-07-15（生产可用性硬化 A+B）：完成 8 项硬化 + 文档同步（SDD 子代理驱动）。**A 簇 运行期正确性**：A1 抽出防御式 `extract_content`（兼容 dict/pydantic delta）；A2 `_single_request` 全生命周期包 try，异常绝不逃逸出 worker 池；A3 空流改判为 `empty_response` 错误（语义变更）；A4 保留合法 `status_code==0` 不再误吞为 `"unknown"`。**B 簇 健壮性边界**：B1 `--metadata` 缺 `=` 走 argparse 友好报错（退出码 2）；B2 单请求 HTTP 超时改为剩余预算 `config.timeout − elapsed`（语义变更，含强断言守护测试）；B3 内建汇总键优先于 `--metadata`、撞名跳过并 stderr 告警；B4 `--num-concurrent-requests`/`--max-num-completed-requests`/`--timeout` 非正值以退出码 2 拒绝。测试 26 → 41 个函数（pytest 43 例）。仅两处语义变更（A3、B2）跨路线对比时需注意。
+- 2026-07-15（生产可用性硬化 A+B）：完成 8 项硬化 + 文档同步（SDD 子代理驱动）。**A 簇 运行期正确性**：A1 抽出防御式 `extract_content`（兼容 dict/pydantic delta）；A2 `_single_request` 全生命周期包 try，异常绝不逃逸出 worker 池；A3 空流改判为 `empty_response` 错误（语义变更）；A4 保留合法 `status_code==0` 不再误吞为 `"unknown"`。**B 簇 健壮性边界**：B1 `--metadata` 缺 `=` 走 argparse 友好报错（退出码 2）；B2 单请求 HTTP 超时改为剩余预算 `config.timeout − elapsed`（语义变更，含强断言守护测试）；B3 内建汇总键优先于 `--metadata`、撞名跳过并 stderr 告警；B4 `--num-concurrent-requests`/`--max-num-completed-requests`/`--timeout` 非正值以退出码 2 拒绝。测试 26 → 43 个函数（pytest 48 例）。仅两处语义变更（A3、B2）跨路线对比时需注意。
+- 2026-07-15（最终全分支评审收口）：评审 verdict READY TO MERGE，唯一 Important finding #1——A2 的"异常绝不逃逸"还漏了 `body.update(additional_sampling_params)` 在 try 之外这一条 setup 路径（非对象采样参数会抛 `TypeError` 逃逸）。按"两者都做"修复：解析期 `parse_json_dict` 校验必须为 JSON 对象（退出码 2）+ 运行时把 `body.update` 移进 `try` 兜底库直调方。新增 2 个测试函数（cli 8、runner 17）。提交 `8bda166`。
 - 2026-07-05：Task 3（`runner.py`）、Task 4（`__main__.py`/`__init__.py`）、Task 5（`docs/benchmark.md`）全部完成，26 个测试全绿，模块正式完工。记录 `prompts.py` 的 `stddev==0` 死循环 bug 修复。
 - 2026-07-05（第二次扫描）：核实 `metrics.py` 与 `tests/test_benchmark_metrics.py` 已完成。
 - 2026-07-05（首次扫描）：首次生成本模块文档，标注当时为半成品状态（仅 Task 1 完成）。

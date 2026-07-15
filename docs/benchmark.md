@@ -32,3 +32,4 @@ python -m llmperf.benchmark \
 - **单请求错误隔离**：任何单个请求内部抛出的异常都会被就地转成一条带 `error_code`/`error_msg` 的失败记录，不会中断并发池里的其他请求。错误码取自异常的 `status_code`（保留合法的 `0`，仅在缺失时才记 `"unknown"`）。
 - **`--metadata` 校验与优先级**：格式必须是 `key=value`（逗号分隔多项）；某项缺 `=` 会直接报错退出（退出码 2）。用户 metadata 键若与内建汇总字段（`model` / `num_concurrent_requests` / `timestamp` / `litellm_version`）撞名，会被忽略并在 stderr 打印告警——内建字段永远优先。
 - **数值参数下限**：`--num-concurrent-requests` 与 `--max-num-completed-requests` 必须 ≥ 1，`--timeout` 必须 > 0；否则报错退出（退出码 2），不再静默跑出一份空报告。
+- **`--additional-sampling-params` 必须是 JSON 对象**：非法 JSON 或合法但非对象（如 `'[1,2]'`、`'5'`）都会报错退出（退出码 2），而不是把非法值透传到底层导致压测中途崩溃。

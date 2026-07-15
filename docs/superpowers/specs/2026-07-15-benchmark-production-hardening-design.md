@@ -4,7 +4,7 @@
 - 范围：`src/llmperf/benchmark/`（runner / prompts / metrics / \_\_main\_\_）
 - 类型：纯增量硬化，**不改架构、不改 summary/individual JSON 输出结构**
 - 前置：`benchmark` 模块已完工（26 测试全绿），本轮在其上叠加运行时鲁棒性与健壮性边界
-- **状态：已实现（2026-07-15）。** A1-A4、B1-B4 全部落地并逐任务评审，测试 26 → 41 个函数（pytest 43 例）。实施计划与提交映射见 `docs/superpowers/plans/2026-07-15-benchmark-production-hardening.md`。两处有意的语义变更：§3 A3 空流改判 `empty_response` 错误、§4 B2 单请求超时改为剩余预算。
+- **状态：已实现（2026-07-15）。** A1-A4、B1-B4 全部落地并逐任务评审，测试 26 → 43 个函数（pytest 48 例）。实施计划与提交映射见 `docs/superpowers/plans/2026-07-15-benchmark-production-hardening.md`。两处有意的语义变更：§3 A3 空流改判 `empty_response` 错误、§4 B2 单请求超时改为剩余预算。
 
 ## 1. 目标与非目标
 

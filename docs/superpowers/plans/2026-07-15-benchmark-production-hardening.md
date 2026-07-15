@@ -10,7 +10,7 @@
 
 **参考 spec:** `docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`（§3 A 簇、§4 B 簇、§5 测试矩阵、§6 影响面）。
 
-> **✅ 状态：全部完成（2026-07-15，SDD 子代理驱动执行）。** 提交映射：A1 `d6b2810`、A2 `c6f5a54`、A3 `dc0d397`、A4 `97ec1b0`、B1 `5990b0f`、B2 `ad5492d`(+`e1ad5e4` 强化测试)、B3 `8997faa`、B4 `6b8cfa5`。测试 26 → 41 个函数（pytest 43 例）。分支 base `65a70cb`。逐任务评审记录见 `.superpowers/sdd/progress.md`；Task 8 独立评审门因子代理连续 "Prompt is too long" 派发失败，已折叠进最终全分支评审。
+> **✅ 状态：全部完成（2026-07-15，SDD 子代理驱动执行）。** 提交映射：A1 `d6b2810`、A2 `c6f5a54`、A3 `dc0d397`、A4 `97ec1b0`、B1 `5990b0f`、B2 `ad5492d`(+`e1ad5e4` 强化测试)、B3 `8997faa`、B4 `6b8cfa5`。测试 26 → 43 个函数（pytest 48 例）。分支 base `65a70cb`。逐任务评审记录见 `.superpowers/sdd/progress.md`；Task 8 独立评审门因子代理连续 "Prompt is too long" 派发失败，已折叠进最终全分支评审。
 
 ## Global Constraints
 
