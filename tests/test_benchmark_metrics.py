@@ -119,6 +119,34 @@ def test_summarize_error_code_keys_are_str_and_json_safe():
     json.dumps(out)  # 不抛异常
 
 
+# ---- 开环速率模式（spec 2026-07-20 §4/§6 M1-M2） ----
+
+
+def test_summarize_open_loop_adds_sched_delay_and_achieved_rate():
+    # M1：结果带 SCHED_DELAY 键即开环运行 → summary 追加统计块与达成速率；
+    # 错误请求的调度延迟同样计入（客户端排队与请求成败无关，spec §3.4）。
+    ok = _raw(0.1, 1.1, 10, 5)
+    ok[cm.SCHED_DELAY] = 0.2
+    bad = _raw(0.0, 0.0, 0, 0, error_code="500", error_msg="boom")
+    bad[cm.SCHED_DELAY] = 0.6
+    out = metrics.summarize([ok, bad], wall_clock_s=2.0)
+
+    block = out[cm.SCHED_DELAY]
+    assert block["mean"] == (0.2 + 0.6) / 2  # 错误请求计入
+    assert block["min"] == 0.2
+    assert block["max"] == 0.6
+    assert "quantiles" in block and "stddev" in block  # 与其它指标同形
+    assert out[cm.ACHIEVED_REQUEST_RATE] == 2 / 2.0  # started / wall
+    json.dumps(out)  # JSON 安全
+
+
+def test_summarize_closed_loop_has_no_open_loop_keys():
+    # M2：闭环结果不带 SCHED_DELAY 键 → summary 键集合与现状逐字节一致。
+    out = metrics.summarize([_raw(0.1, 1.1, 10, 5)], wall_clock_s=2.0)
+    assert cm.SCHED_DELAY not in out
+    assert cm.ACHIEVED_REQUEST_RATE not in out
+
+
 def test_summarize_counts_empty_response_as_error():
     results = [
         {

@@ -95,6 +95,20 @@ def summarize(results: List[Dict[str, Any]], wall_clock_s: float) -> Dict[str, A
     ret[cm.ERROR_RATE] = _safe_div(num_errors, num_started)
     ret[cm.ERROR_CODE_FREQ] = freq
 
+    # 开环运行的记录才带 SCHED_DELAY（runner._dispatch_at 写入）；闭环 results
+    # 无此键，以下整段跳过，summary 键集合与闭环现状保持逐字节一致。
+    sched_delays = [r[cm.SCHED_DELAY] for r in results if cm.SCHED_DELAY in r]
+    if sched_delays:
+        # 调度延迟对所有已发射请求统计（含错误，spec §3.4：客户端排队与成败无关）。
+        ret[cm.SCHED_DELAY] = {
+            "quantiles": _safe_quantiles(sched_delays),
+            "mean": statistics.mean(sched_delays),
+            "min": min(sched_delays),
+            "max": max(sched_delays),
+            "stddev": _safe_stdev(sched_delays),
+        }
+        ret[cm.ACHIEVED_REQUEST_RATE] = _safe_div(num_started, wall_clock_s)
+
     total_output = sum(r[cm.NUM_OUTPUT_TOKENS] for r in successful)
     ret[cm.OUTPUT_THROUGHPUT] = _safe_div(total_output, wall_clock_s)
     ret[cm.NUM_COMPLETED_REQUESTS] = len(successful)
