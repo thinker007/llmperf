@@ -36,13 +36,13 @@ class RequestsLauncher:
             A list of results that are ready.
 
         """
+        # has_next() reports whether any future is in flight, not whether one is
+        # ready. With nothing in flight there is nothing to wait for, so blocking
+        # would spin forever — fail fast instead of busy-waiting.
+        if block and not self._llm_client_pool.has_next():
+            raise StopIteration("No in-flight requests to wait for")
+
         results = []
-        if not block:
-            while self._llm_client_pool.has_next():
-                results.append(self._llm_client_pool.get_next_unordered())
-        else:
-            while not self._llm_client_pool.has_next():
-                pass
-            while self._llm_client_pool.has_next():
-                results.append(self._llm_client_pool.get_next_unordered())
+        while self._llm_client_pool.has_next():
+            results.append(self._llm_client_pool.get_next_unordered())
         return results
