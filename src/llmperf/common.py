@@ -9,7 +9,17 @@ from llmperf.ray_clients.vertexai_client import VertexAIClient
 from llmperf.ray_llm_client import LLMClient
 
 
-SUPPORTED_APIS = ["openai", "anthropic", "litellm"]
+# Registry keeps SUPPORTED_APIS and the constructor branches in sync: the error
+# message can never again claim an API the code doesn't actually build.
+_CLIENT_REGISTRY = {
+    "openai": OpenAIChatCompletionsClient,
+    "anthropic": AnthropicMessagesClient,
+    "sagemaker": SageMakerClient,
+    "vertexai": VertexAIClient,
+    "litellm": LiteLLMClient,
+}
+
+SUPPORTED_APIS = list(_CLIENT_REGISTRY)
 
 
 def construct_clients(llm_api: str, num_clients: int) -> List[LLMClient]:
@@ -23,19 +33,11 @@ def construct_clients(llm_api: str, num_clients: int) -> List[LLMClient]:
         The constructed LLMCLients
 
     """
-    if llm_api == "openai":
-        clients = [OpenAIChatCompletionsClient.remote() for _ in range(num_clients)]
-    elif llm_api == "anthropic":
-        clients = [AnthropicMessagesClient.remote() for _ in range(num_clients)]
-    elif llm_api == "sagemaker":
-        clients = [SageMakerClient.remote() for _ in range(num_clients)]
-    elif llm_api == "vertexai":
-        clients = [VertexAIClient.remote() for _ in range(num_clients)]
-    elif llm_api in SUPPORTED_APIS:
-        clients = [LiteLLMClient.remote() for _ in range(num_clients)]
-    else:
+    try:
+        client_cls = _CLIENT_REGISTRY[llm_api]
+    except KeyError:
         raise ValueError(
             f"llm_api must be one of the supported LLM APIs: {SUPPORTED_APIS}"
         )
 
-    return clients
+    return [client_cls.remote() for _ in range(num_clients)]
