@@ -69,6 +69,12 @@ def test_metadata_does_not_override_builtin_keys(monkeypatch, capsys):
         ["--num-concurrent-requests", "0"],
         ["--max-num-completed-requests", "-1"],
         ["--timeout", "0"],
+        # M2：mean<=0 会让 sample_random_positive_int 死循环（stddev=0 时必然），
+        # 必须在 CLI 层拦截；stddev 为负同样没有意义。
+        ["--mean-input-tokens", "0"],
+        ["--mean-output-tokens", "-5"],
+        ["--stddev-input-tokens", "-1"],
+        ["--stddev-output-tokens", "-1"],
     ],
 )
 def test_main_rejects_non_positive_numeric_args(bad_args):

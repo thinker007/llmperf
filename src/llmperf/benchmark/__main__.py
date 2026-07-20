@@ -87,6 +87,15 @@ def main(argv: Optional[List[str]] = None) -> None:
         parser.error("--max-num-completed-requests must be >= 1")
     if args.timeout <= 0:
         parser.error("--timeout must be > 0")
+    # M2：mean<=0 会让 sample_random_positive_int 死循环，必须在此拦截。
+    if args.mean_input_tokens <= 0:
+        parser.error("--mean-input-tokens must be > 0")
+    if args.mean_output_tokens <= 0:
+        parser.error("--mean-output-tokens must be > 0")
+    if args.stddev_input_tokens < 0:
+        parser.error("--stddev-input-tokens must be >= 0")
+    if args.stddev_output_tokens < 0:
+        parser.error("--stddev-output-tokens must be >= 0")
 
     config = BenchmarkConfig(
         model=args.model,

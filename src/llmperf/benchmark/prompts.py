@@ -12,6 +12,9 @@ _SONNET_PATH = pathlib.Path(__file__).parent / "sonnet.txt"
 
 def sample_random_positive_int(mean: int, stddev: int) -> int:
     """从高斯分布采样直到得到正整数。移植自 utils.py:121-134。"""
+    # M2：mean<=0 时 stddev=0 必然死循环、stddev>0 概率性死循环，快速失败。
+    if mean <= 0:
+        raise ValueError(f"mean must be positive to sample a positive int, got {mean}")
     ret = -1
     while ret <= 0:
         ret = int(random.gauss(mean, stddev))
