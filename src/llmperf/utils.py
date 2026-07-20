@@ -4,19 +4,30 @@ import pathlib
 import random
 import subprocess
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from transformers import LlamaTokenizerFast
 
-
 RESULTS_VERSION = "2023-08-31"
+
+_DEFAULT_TOKENIZER = None
+
+
+def _get_default_tokenizer():
+    """惰性加载并缓存默认 Llama 分词器（避免 import 期副作用/网络依赖）。"""
+    global _DEFAULT_TOKENIZER
+    if _DEFAULT_TOKENIZER is None:
+        _DEFAULT_TOKENIZER = LlamaTokenizerFast.from_pretrained(
+            "hf-internal-testing/llama-tokenizer"
+        )
+    return _DEFAULT_TOKENIZER
 
 
 class LLMPerfResults:
     def __init__(
         self,
         name: str,
-        metadata: Dict[str, Any] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         self.name = name
         self.metadata = metadata or {}
@@ -60,8 +71,7 @@ def randomly_sample_sonnet_lines_prompt(
     prompt_tokens_mean: int = 550,
     prompt_tokens_stddev: int = 250,
     expect_output_tokens: int = 150,
-    tokenizer = LlamaTokenizerFast.from_pretrained(
-        "hf-internal-testing/llama-tokenizer")
+    tokenizer=None,
 ) -> Tuple[str, int]:
     """Generate a prompt that randomly samples lines from a the shakespeare sonnet at sonnet.txt.
 
@@ -82,6 +92,8 @@ def randomly_sample_sonnet_lines_prompt(
         A tuple of the prompt and the length of the prompt.
     """
 
+    if tokenizer is None:
+        tokenizer = _get_default_tokenizer()
     get_token_length = lambda text: len(tokenizer.encode(text))
 
     prompt = (
@@ -93,10 +105,15 @@ def randomly_sample_sonnet_lines_prompt(
     num_prompt_tokens = sample_random_positive_int(
         prompt_tokens_mean, prompt_tokens_stddev
     )
-    while num_prompt_tokens < get_token_length(prompt):
-        num_prompt_tokens = sample_random_positive_int(
-            prompt_tokens_mean, prompt_tokens_stddev
-        )
+    if prompt_tokens_stddev == 0:
+        # M2：gauss(mean, 0) 是确定值，重采样永远越不过基底长度 → 死循环。
+        # 与 benchmark/prompts.py:47-50 同款 clamp。
+        num_prompt_tokens = max(num_prompt_tokens, get_token_length(prompt))
+    else:
+        while num_prompt_tokens < get_token_length(prompt):
+            num_prompt_tokens = sample_random_positive_int(
+                prompt_tokens_mean, prompt_tokens_stddev
+            )
     remaining_prompt_tokens = num_prompt_tokens - get_token_length(prompt)
     sonnet_path = pathlib.Path(__file__).parent.resolve() / "sonnet.txt"
     with open(sonnet_path, "r") as f:
@@ -128,6 +145,9 @@ def sample_random_positive_int(mean: int, stddev: int) -> int:
     Returns:
         A random positive integer sampled from the gaussian distribution.
     """
+    # M2：mean<=0 时 stddev=0 必然死循环、stddev>0 概率性死循环，快速失败。
+    if mean <= 0:
+        raise ValueError(f"mean must be positive to sample a positive int, got {mean}")
     ret = -1
     while ret <= 0:
         ret = int(random.gauss(mean, stddev))
