@@ -11,7 +11,7 @@
 项目由两条并行的技术路线组成：
 
 1. **成熟的 Ray 压测路线**（`token_benchmark_ray.py` + `llm_correctness.py` + `src/llmperf/`）：以 Ray Actor 作为并发原语，`RequestsLauncher` 通过 `ActorPool` 派发请求，多线程（`threading.Thread`）驱动多个 Actor 池并行工作，使用固定的 Llama 分词器保证跨模型 token 计数口径一致。这是当前**唯一可用、可跑通**的压测入口。
-2. **轻量 asyncio 压测路线**（`src/llmperf/benchmark/`）：用 `asyncio` worker-pool 直接压 `litellm.acompletion()`，去掉 Ray/threading/pandas/transformers 等重脚手架，与 Ray 路线并存、零侵入。**已完工，并于 2026-07-15 完成一轮生产可用性硬化**（A1-A4 运行期正确性 + B1-B4 健壮性边界，43 个测试函数 / pytest 48 例全绿），`python -m llmperf.benchmark` 是可用的 CLI 入口。完整设计见 `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`（原始）与 `.../2026-07-15-benchmark-production-hardening-design.md`（硬化）、实施计划见对应 plan 文档、用户文档见 `docs/benchmark.md`。
+2. **轻量 asyncio 压测路线**（`src/llmperf/benchmark/`）：用 `asyncio` worker-pool 直接压 `litellm.acompletion()`，去掉 Ray/threading/pandas/transformers 等重脚手架，与 Ray 路线并存、零侵入。**已完工，2026-07-15 完成生产可用性硬化**（A1-A4 运行期正确性 + B1-B4 健壮性边界），**2026-07-20 新增开环请求速率模式**（`--request-rate`，泊松到达 + 在途上限，57 个测试函数 / pytest 70 例全绿），`python -m llmperf.benchmark` 是可用的 CLI 入口。完整设计见 `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`（原始）、`.../2026-07-15-benchmark-production-hardening-design.md`（硬化）与 `.../2026-07-20-benchmark-open-loop-design.md`（开环模式）、实施计划见对应 plan 文档、用户文档见 `docs/benchmark.md`。
 
 两条路线共享同一套指标常量命名（`src/llmperf/common_metrics.py`），但**指标口径不完全一致**（尤其是 Inter-Token Latency 的计算公式在新路线里被有意修正，`metrics.py` 中已实际生效，见 `src/llmperf/benchmark/CLAUDE.md`），使用时注意不要跨路线直接对比数字。
 
@@ -38,7 +38,7 @@ graph TD
 |---|---|---|---|
 | `src/llmperf` | 核心框架：`RequestConfig` 数据模型、指标常量、`LLMClient` 抽象接口、`RequestsLauncher` 调度、`utils.py` 工具函数；以及紧密耦合的两个入口脚本 `token_benchmark_ray.py`（性能压测）与 `llm_correctness.py`（正确性校验，位于仓库根目录） | Python | [详见](./src/llmperf/CLAUDE.md) |
 | `src/llmperf/ray_clients` | 5 个 Ray Actor 客户端：OpenAI / Anthropic（原生）/ LiteLLM（万能兜底）/ SageMaker / VertexAI | Python | [详见](./src/llmperf/ray_clients/CLAUDE.md) |
-| `src/llmperf/benchmark` | 轻量 asyncio 压测子模块，**已完工 + 生产可用性硬化**：prompt 采样、指标聚合、worker-pool 并发引擎、CLI 全部就绪，A/B 两簇 8 项硬化落地，43 个测试函数（pytest 48 例）全绿 | Python | [详见](./src/llmperf/benchmark/CLAUDE.md) |
+| `src/llmperf/benchmark` | 轻量 asyncio 压测子模块，**已完工 + 生产硬化 + 开环速率模式**：prompt 采样、指标聚合、闭环 worker-pool 与开环泊松发射双引擎、CLI 全部就绪，57 个测试函数（pytest 70 例）全绿 | Python | [详见](./src/llmperf/benchmark/CLAUDE.md) |
 | `tests` | pytest 单元测试，均为纯函数级测试（不连真实网络、不起 Ray） | Python | [详见](./tests/CLAUDE.md) |
 | `docs/superpowers` | `benchmark` 子模块的设计规划文档（Markdown 计划书 + 设计规格），非代码 | Markdown | 不生成独立模块 CLAUDE.md，理由见下 |
 | `.traces` | 运行期产生的 trace 日志（`.jsonl`/`.log`/`.html`） | - | 运行期产物，不生成文档 |

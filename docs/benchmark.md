@@ -19,6 +19,25 @@ python -m llmperf.benchmark \
 不传 `--results-dir` 时只把 summary 打印到 stdout；传了则额外落盘
 `<model>_<in>_<out>_summary.json` 和 `..._individual_responses.json` 两个文件。
 
+## 开环速率模式（`--request-rate`，2026-07-20 新增）
+
+默认（不传 `--request-rate`）是**闭环**压测：固定 N 个并发槽，上一个请求返回才发下一个，回答"固定并发下延迟多少"。加上 `--request-rate` 后切换为**开环**压测：请求按泊松过程（指数分布间隔）在计划时刻到达并发出，不等前序请求返回，回答"流量以 X QPS 到达时服务会不会排队恶化"——这是 vLLM `benchmark_serving` 等主流工具同款的测量口径。
+
+```bash
+python -m llmperf.benchmark \
+  --model gpt-4o \
+  --request-rate 5 \
+  --num-concurrent-requests 50 \
+  --max-num-completed-requests 200 \
+  --timeout 600
+```
+
+- `--request-rate` 必须 > 0（每秒到达请求数）。
+- 开环下 `--num-concurrent-requests` 语义变为**最大在途请求数上限**：服务恶化时新到达会先排队等名额，防止客户端无限堆积。
+- 计划到达时刻已超过 `--timeout` 的请求不会生成；拿到名额时预算已尽的请求不发射、不产生记录（与闭环"到点停发"口径一致）。
+- summary 新增三个键：`scheduling_delay_s`（统计块：实际发出时刻 − 计划到达时刻，反映客户端因在途上限排队的程度；对**所有已发射请求**统计，含失败的）、`achieved_requests_per_s`（实际达成速率，与 `--request-rate` 目标差距大说明在途上限或客户端在限流）、`request_rate`（目标值回显）。individual 记录相应多一个 `scheduling_delay_s` 字段。闭环运行的输出结构完全不变。
+- **语义提示**：开环下错误率天然可能高于闭环——请求不等前序返回，服务过载时会真实暴露排队与超时，这正是该模式的测量目的。
+
 ## 与原 Ray 版（`token_benchmark_ray.py`）的差异
 
 - **并发引擎**：asyncio worker-pool 替代 Ray + threading，零重依赖。

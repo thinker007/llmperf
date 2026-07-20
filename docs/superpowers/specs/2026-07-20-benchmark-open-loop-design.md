@@ -4,6 +4,7 @@
 - 范围：`src/llmperf/benchmark/`（runner / metrics / \_\_main\_\_）+ `src/llmperf/common_metrics.py`（仅追加常量）
 - 类型：增量新功能。**不传 `--request-rate` 时闭环行为与 summary/individual JSON 输出结构完全不变**
 - 前置：`benchmark` 模块已完工并完成生产硬化（43 测试函数 / pytest 48 例全绿）
+- **状态：已实现（2026-07-20）。** R1-R7 / M1-M2 / C1-C3 全部落地，benchmark 路线测试增至 57 个函数（pytest 70 例）。实施计划与提交映射见 `docs/superpowers/plans/2026-07-20-benchmark-open-loop.md`。
 
 ## 1. 动机与目标
 

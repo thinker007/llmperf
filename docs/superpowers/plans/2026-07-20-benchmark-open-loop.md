@@ -10,6 +10,8 @@
 
 **参考 spec:** `docs/superpowers/specs/2026-07-20-benchmark-open-loop-design.md`（§3 并发模型、§4 指标、§5 CLI、§6 测试矩阵）。
 
+> **✅ 状态：全部完成（2026-07-20）。** 提交映射：Task 1 `b699802`、Task 2 `842a8b2`、Task 3 `c25841a`、Task 4 见本提交。前置收口：上一迭代遗留的 M2 半成品（CLI 层 mean/stddev 校验缺失）以 `7e31075` 补齐。benchmark 路线测试 43 → 57 个函数（pytest 70 例）全绿。
+
 ## Global Constraints
 
 - 类型注解**必须**用 `typing.List/Dict/Tuple/Optional`，**禁止** `list[str]` / `X | None`（`requires-python >=3.8,<3.11`）。
@@ -34,9 +36,9 @@
 - `_dispatch_at(config, text, n_in, max_tokens, offset, start, sem, results) -> None` — 睡到时刻→抢名额→重查预算→发射并记 `SCHED_DELAY`（spec §3.2）
 - `run_benchmark`：`request_rate <= 0` 抛 `ValueError`；闭环分支代码原样不动
 
-- [ ] Step 1: Red — 写 R1–R7 七组失败测试
-- [ ] Step 2: Green — 实现并跑通 `python -m pytest tests/test_benchmark_runner.py -v`
-- [ ] Step 3: 全量回归 + `black .` + commit `feat(benchmark): open-loop request-rate engine in runner (Task 1/R)`
+- [x] Step 1: Red — 写 R1–R7 七组失败测试
+- [x] Step 2: Green — 实现并跑通 `python -m pytest tests/test_benchmark_runner.py -v`
+- [x] Step 3: 全量回归 + `black .` + commit `feat(benchmark): open-loop request-rate engine in runner (Task 1/R)`
 
 ### Task 2: metrics 条件扩展（`SCHED_DELAY` 统计块 + 达成速率）
 
@@ -45,9 +47,9 @@
 - Modify: `src/llmperf/benchmark/metrics.py`（`summarize` 末尾条件追加，spec §4.2）
 - Test: `tests/test_benchmark_metrics.py`（M1–M2）
 
-- [ ] Step 1: Red — M1（含错误请求的调度延迟计入）+ M2（闭环无新键）
-- [ ] Step 2: Green + 全量回归
-- [ ] Step 3: `black .` + commit `feat(benchmark): scheduling-delay stats and achieved rate in summarize (Task 2/M)`
+- [x] Step 1: Red — M1（含错误请求的调度延迟计入）+ M2（闭环无新键）
+- [x] Step 2: Green + 全量回归
+- [x] Step 3: `black .` + commit `feat(benchmark): scheduling-delay stats and achieved rate in summarize (Task 2/M)`
 
 ### Task 3: CLI 接线（`--request-rate` 参数 + 校验 + 回显）
 
@@ -55,9 +57,9 @@
 - Modify: `src/llmperf/benchmark/__main__.py`（参数、B4 式校验、config 接线、summary 条件回显）
 - Test: `tests/test_benchmark_cli.py`（C1–C3）
 
-- [ ] Step 1: Red — C1（0 与负数退出码 2）+ C2（接线与回显）+ C3（默认零侵入）
-- [ ] Step 2: Green + 全量回归
-- [ ] Step 3: `black .` + commit `feat(benchmark): --request-rate CLI flag with validation (Task 3/C)`
+- [x] Step 1: Red — C1（0 与负数退出码 2）+ C2（接线与回显）+ C3（默认零侵入）
+- [x] Step 2: Green + 全量回归
+- [x] Step 3: `black .` + commit `feat(benchmark): --request-rate CLI flag with validation (Task 3/C)`
 
 ### Task 4: 文档同步
 
@@ -66,5 +68,5 @@
 - Modify: `src/llmperf/benchmark/CLAUDE.md`、`tests/CLAUDE.md`、根 `CLAUDE.md`（状态与测试数）
 - Modify: 本 plan 勾选 + spec 回填状态行
 
-- [ ] Step 1: 更新用户文档与各级 CLAUDE.md
-- [ ] Step 2: commit `docs(benchmark): document open-loop request-rate mode (Task 4)`
+- [x] Step 1: 更新用户文档与各级 CLAUDE.md
+- [x] Step 2: commit `docs(benchmark): document open-loop request-rate mode (Task 4)`

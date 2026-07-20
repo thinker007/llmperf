@@ -2,7 +2,9 @@
 
 ## 模块职责
 
-**本模块已完工，并于 2026-07-15 完成一轮"生产可用性硬化"迭代（A1-A4 运行期正确性 + B1-B4 健壮性边界，43 个测试函数 / pytest 展开 48 例全绿）。** `python -m llmperf.benchmark` 是可用的 CLI 入口。
+**本模块已完工，并于 2026-07-15 完成一轮"生产可用性硬化"迭代（A1-A4 运行期正确性 + B1-B4 健壮性边界），2026-07-20 新增开环请求速率模式（`--request-rate`，泊松到达 + 在途上限）。57 个测试函数 / pytest 展开 70 例全绿。** `python -m llmperf.benchmark` 是可用的 CLI 入口。
+
+> 开环模式的设计规格见 `docs/superpowers/specs/2026-07-20-benchmark-open-loop-design.md`、实施计划见 `docs/superpowers/plans/2026-07-20-benchmark-open-loop.md`。不传 `--request-rate` 时闭环行为与输出结构完全不变。
 
 > 硬化迭代的设计规格见 `docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`、实施计划见 `docs/superpowers/plans/2026-07-15-benchmark-production-hardening.md`。本轮引入两处**有意的语义变更**：(A3) 空流从"成功"改判为 `empty_response` 错误；(B2) 单请求 HTTP 超时从"固定 `config.timeout`"改为"剩余预算 `config.timeout − 已用时`"。
 
@@ -82,8 +84,12 @@ async def _single_request(config, prompt_text, num_input_tokens, sampled_max_tok
 # 纯函数，可直接单测（A1 防御式提取）：
 def _get(delta: Any, key: str) -> Optional[str]          # dict 用 .get，pydantic 对象用 getattr
 def extract_content(delta: Any) -> Optional[str]         # reasoning_content or content，任一缺失/异型都不炸
+# 开环模式（2026-07-20）：
+def _arrival_offsets(rate: float, count: int, horizon: float) -> List[float]  # 泊松到达时刻表（纯函数）
+async def _dispatch_at(config, text, n_in, max_tokens, offset, start, sem, results) -> None
 ```
-- **并发模型：worker-pool，钉死不用 `gather` 批处理**。`run_benchmark` 预生成恰好 `max_num_completed_requests` 条 prompt 放进有界 `asyncio.Queue`，`num_concurrent_requests` 个常驻协程各自死循环 `queue.get_nowait()` 取任务，任一请求完成立刻取下一个。这直接避免了旧 Ray 路线历史上真实踩过的 `#59` bug（commit `f1d6bed`）——"凑够一批再一起等"的语义下，在途请求数会从 N 塌陷到 1 再回弹，拖慢吞吐。`tests/test_benchmark_runner.py::test_run_benchmark_concurrency_stays_at_n` 专门验证"队列有货时持续保持 == N"（不只是"峰值 ≤ N"这种弱断言）。
+- **开环速率模式（2026-07-20）**：`BenchmarkConfig.request_rate` 非 `None`（须 > 0，否则 `run_benchmark` 抛 `ValueError`）时走开环分支——`_arrival_offsets` 生成泊松到达时刻表（首到达 0 时刻、间隔 `random.expovariate(rate)`、越过 `timeout` horizon 截断），每个到达一个 `_dispatch_at` task：睡到计划时刻 → `Semaphore(num_concurrent_requests)` 抢在途名额 → 拿到名额后重查全局预算（已尽则不发射、不产生记录）→ 发射并在结果里记 `SCHED_DELAY`（实际发出 − 计划到达，**对含失败的全部已发射请求记录**，客户端排队与成败无关）。闭环分支代码原样保留，闭环结果不带 `SCHED_DELAY` 键。
+- **并发模型（闭环默认）：worker-pool，钉死不用 `gather` 批处理**。`run_benchmark` 预生成恰好 `max_num_completed_requests` 条 prompt 放进有界 `asyncio.Queue`，`num_concurrent_requests` 个常驻协程各自死循环 `queue.get_nowait()` 取任务，任一请求完成立刻取下一个。这直接避免了旧 Ray 路线历史上真实踩过的 `#59` bug（commit `f1d6bed`）——"凑够一批再一起等"的语义下，在途请求数会从 N 塌陷到 1 再回弹，拖慢吞吐。`tests/test_benchmark_runner.py::test_run_benchmark_concurrency_stays_at_n` 专门验证"队列有货时持续保持 == N"（不只是"峰值 ≤ N"这种弱断言）。
 - **`--timeout` 与单请求超时（B2 硬化）**：`--timeout` 到点后 worker 停止取新任务，但不 cancel 在途请求，等其自然完成后计入统计。给 `acompletion` 透传的 HTTP 层 `timeout` **不再是固定的 `config.timeout`**，而是 worker 每次取任务前算出的**剩余预算** `max(0.0, config.timeout − elapsed)`（`elapsed` 由单次 `time.monotonic()` 采样得出）。这样单个慢请求最多拖到整体预算耗尽，而不是在预算末尾还能再独占一整个 `config.timeout`。`_single_request` 的 `request_timeout` 参数为 `None` 时回退到 `config.timeout`（保持库直调时的旧行为）。守护测试：`test_worker_derives_shrinking_budget`（monotonic 前进 → 断言 `0 < 透传 timeout < config.timeout`，能抓住"退回固定 config.timeout"的回归）。
 - **`_single_request` 绝不让异常逃逸（A2 硬化）**：流式采集骨架照搬 `ray_clients/litellm_client.py:61-103`（只把同步 `for` 换成 `async for`），整个请求生命周期包在 `try/except Exception as e` 内，`num_output_tokens`/`token_counter` 计费也移进 `try`——任何环节抛错都被就地转成一条带 `error_code`/`error_msg` 的 result dict 返回，**不会**冒泡到 worker 协程把整个池带崩。
 - **错误码从异常真实提取，且保留 `status_code == 0`（A4 硬化）**：`sc = getattr(e, "status_code", None); error_code = "unknown" if sc is None else str(sc)`。原代码写的是 `sc or "unknown"`，会把合法的 `status_code == 0` 误吞成 `"unknown"`——已修正为只在 `None` 时才落 `"unknown"`。
@@ -122,11 +128,12 @@ summarize 输出：
   6 个 quantile key 各自 {quantiles:{p25..p99}, mean, min, max, stddev}
   + num_requests_started / number_errors / error_rate / error_code_frequency(Dict[str,int])
   + mean_output_throughput_token_per_s / num_completed_requests / num_completed_requests_per_min
+  + 仅开环（results 携带 scheduling_delay_s 时）：scheduling_delay_s 统计块 + achieved_requests_per_s
 
 BenchmarkConfig: model, mean_input_tokens=550, stddev_input_tokens=150,
                  mean_output_tokens=150, stddev_output_tokens=80,
                  num_concurrent_requests=10, max_num_completed_requests=10,
-                 timeout=90, additional_sampling_params={}
+                 timeout=90, additional_sampling_params={}, request_rate=None
 run_benchmark(config) -> (results: List[Dict], wall_clock_s: float)
 ```
 
@@ -141,12 +148,12 @@ run_benchmark(config) -> (results: List[Dict], wall_clock_s: float)
 
 | 测试文件 | 用例数 | 覆盖点 |
 |---|---|---|
-| `tests/test_benchmark_prompts.py` | 4 | 高斯重采样必为正数、`sample_output_len` 恒正、`sample_prompt` 口径自洽、小均值场景下的收敛性（含 `stddev=0` 边界，曾在实现时触发死循环 bug） |
-| `tests/test_benchmark_metrics.py` | 14 | 换算正确性、`_safe_div`/`_safe_stdev`/`_safe_quantiles` 全部除零与 n<2 边界、`summarize` 成功/失败分流、全失败场景、`wall_clock_s==0`、`error_code` 类型归一为 `str`、**空流计为 `empty_response` 错误（A3）** |
-| `tests/test_benchmark_runner.py` | 17 | TTFT/文本采集、**`extract_content` 四种 delta 形态（A1）**、`reasoning_content` 计入、错误从异常真实提取、**异常绝不逃逸（A2）**、**`status_code==0` 保留（A4）**、有界队列软上限、**worker-pool 并发稳定性**（峰值==N 且持续保持==N，不塌陷）、**单请求超时=剩余预算且随耗时收缩（B2）**、**库直调非 dict 采样参数转失败记录不逃逸（评审 finding #1）** |
-| `tests/test_benchmark_cli.py` | 8 | `--metadata` 解析（`split("=",1)`、重复 key 覆盖）、**缺 `=` 抛 `ArgumentTypeError`（B1）**、文件名清洗、非法 JSON 报错退出、**内建键不被 metadata 覆盖并告警（B3）**、**非正数值参数以退出码 2 拒绝（B4，参数化 ×3）**、**`--additional-sampling-params` 合法 JSON 但非对象以退出码 2 拒绝（参数化 ×4，评审 finding #1）** |
+| `tests/test_benchmark_prompts.py` | 5 | 高斯重采样必为正数、`sample_output_len` 恒正、`sample_prompt` 口径自洽、小均值场景下的收敛性（含 `stddev=0` 边界，曾在实现时触发死循环 bug）、**`mean<=0` 快速失败抛 `ValueError`（M2，参数化 ×3）** |
+| `tests/test_benchmark_metrics.py` | 16 | 换算正确性、`_safe_div`/`_safe_stdev`/`_safe_quantiles` 全部除零与 n<2 边界、`summarize` 成功/失败分流、全失败场景、`wall_clock_s==0`、`error_code` 类型归一为 `str`、**空流计为 `empty_response` 错误（A3）**、**开环 `scheduling_delay_s` 统计块与 `achieved_requests_per_s`（含错误请求计入）+ 闭环无新键（开环 M1-M2）** |
+| `tests/test_benchmark_runner.py` | 26 | TTFT/文本采集、**`extract_content` 四种 delta 形态（A1）**、`reasoning_content` 计入、错误从异常真实提取、**异常绝不逃逸（A2）**、**`status_code==0` 保留（A4）**、有界队列软上限、**worker-pool 并发稳定性**（峰值==N 且持续保持==N，不塌陷）、**单请求超时=剩余预算且随耗时收缩（B2）**、**库直调非 dict 采样参数转失败记录不逃逸（评审 finding #1）**、**开环 R1-R7**（泊松时刻表/horizon 与 count 截断、发射链路记调度延迟、信号量封顶在途、预算尽不发射、剩余预算保持、闭环无 `SCHED_DELAY` 键、非正速率抛 `ValueError`） |
+| `tests/test_benchmark_cli.py` | 10 | `--metadata` 解析（`split("=",1)`、重复 key 覆盖）、**缺 `=` 抛 `ArgumentTypeError`（B1）**、文件名清洗、非法 JSON 报错退出、**内建键不被 metadata 覆盖并告警（B3）**、**非正数值参数以退出码 2 拒绝（B4+M2+开环 C1，参数化 ×9）**、**`--additional-sampling-params` 合法 JSON 但非对象以退出码 2 拒绝（参数化 ×4，评审 finding #1）**、**`--request-rate` 接线与回显 + 默认闭环零侵入（开环 C2-C3）** |
 
-全部 43 个测试函数（pytest 展开 48 例）无需网络（`prompts`/`metrics` 是纯函数；`runner`/`cli` 用 `monkeypatch` 注入假的 `acompletion`/`token_counter`）。运行：
+全部 57 个测试函数（pytest 展开 70 例）无需网络（`prompts`/`metrics` 是纯函数；`runner`/`cli` 用 `monkeypatch` 注入假的 `acompletion`/`token_counter`）。运行：
 ```bash
 python -m pytest tests/test_benchmark_prompts.py tests/test_benchmark_metrics.py tests/test_benchmark_runner.py tests/test_benchmark_cli.py -v
 ```
@@ -181,6 +188,7 @@ python -m pytest tests/test_benchmark_prompts.py tests/test_benchmark_metrics.py
 
 ## 变更记录 (Changelog)
 
+- 2026-07-20（开环请求速率模式）：新增 `--request-rate` / `BenchmarkConfig.request_rate`——泊松到达（`_arrival_offsets` 纯函数时刻表 + `_dispatch_at` 发射协程）+ `Semaphore` 在途上限 + 每请求 `scheduling_delay_s` + summary 条件追加 `scheduling_delay_s` 统计块与 `achieved_requests_per_s`。闭环（默认）行为与输出结构零变化。同轮收口上一迭代遗留的 M2 半成品（`sample_random_positive_int` 的 `mean<=0` 快速失败 + CLI 层 mean/stddev 校验）。测试 43 → 57 个函数（pytest 70 例）。
 - 2026-07-15（生产可用性硬化 A+B）：完成 8 项硬化 + 文档同步（SDD 子代理驱动）。**A 簇 运行期正确性**：A1 抽出防御式 `extract_content`（兼容 dict/pydantic delta）；A2 `_single_request` 全生命周期包 try，异常绝不逃逸出 worker 池；A3 空流改判为 `empty_response` 错误（语义变更）；A4 保留合法 `status_code==0` 不再误吞为 `"unknown"`。**B 簇 健壮性边界**：B1 `--metadata` 缺 `=` 走 argparse 友好报错（退出码 2）；B2 单请求 HTTP 超时改为剩余预算 `config.timeout − elapsed`（语义变更，含强断言守护测试）；B3 内建汇总键优先于 `--metadata`、撞名跳过并 stderr 告警；B4 `--num-concurrent-requests`/`--max-num-completed-requests`/`--timeout` 非正值以退出码 2 拒绝。测试 26 → 43 个函数（pytest 48 例）。仅两处语义变更（A3、B2）跨路线对比时需注意。
 - 2026-07-15（最终全分支评审收口）：评审 verdict READY TO MERGE，唯一 Important finding #1——A2 的"异常绝不逃逸"还漏了 `body.update(additional_sampling_params)` 在 try 之外这一条 setup 路径（非对象采样参数会抛 `TypeError` 逃逸）。按"两者都做"修复：解析期 `parse_json_dict` 校验必须为 JSON 对象（退出码 2）+ 运行时把 `body.update` 移进 `try` 兜底库直调方。新增 2 个测试函数（cli 8、runner 17）。提交 `8bda166`。
 - 2026-07-05：Task 3（`runner.py`）、Task 4（`__main__.py`/`__init__.py`）、Task 5（`docs/benchmark.md`）全部完成，26 个测试全绿，模块正式完工。记录 `prompts.py` 的 `stddev==0` 死循环 bug 修复。
