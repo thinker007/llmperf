@@ -20,7 +20,7 @@ class OpenAIChatCompletionsClient(LLMClient):
         prompt, prompt_len = prompt
 
         message = [
-         #   {"role": "system", "content": ""},
+            #   {"role": "system", "content": ""},
             {"role": "user", "content": prompt},
         ]
         model = request_config.model
@@ -28,7 +28,7 @@ class OpenAIChatCompletionsClient(LLMClient):
             "model": model,
             "messages": message,
             "stream": True,
-            #"stream_options": {
+            # "stream_options": {
             #        "include_usage": True
             #    }
         }
@@ -95,12 +95,14 @@ class OpenAIChatCompletionsClient(LLMClient):
                         continue
                     # Check if choices array is not empty
                     if not data["choices"] or len(data["choices"]) == 0:
-                        continue    
+                        continue
                     choice = data["choices"][0]
                     if "delta" not in choice:
                         continue
                     delta = data["choices"][0]["delta"]
-                    if delta.get("content", None) or delta.get("reasoning_content", None):#补充推理 reasoning_content
+                    if delta.get("content", None) or delta.get(
+                        "reasoning_content", None
+                    ):  # 补充推理 reasoning_content
                         if ttft == 0:
                             ttft = time.monotonic() - start_time
                             time_to_next_token.append(ttft)
@@ -112,23 +114,27 @@ class OpenAIChatCompletionsClient(LLMClient):
                             generated_text += delta["reasoning_content"]
                         else:
                             generated_text += delta["content"]
+                        # 更新"上一个 token 到达时刻"，否则逐字延迟(ITL)会退化为
+                        # 累计值（与 anthropic/litellm 客户端对齐）。
+                        most_recent_received_token_time = time.monotonic()
 
             total_request_time = time.monotonic() - start_time
             output_throughput = tokens_received / total_request_time
-            
 
         except Exception as e:
             metrics[common_metrics.ERROR_MSG] = error_msg
             metrics[common_metrics.ERROR_CODE] = error_response_code
             tokens_received = 1
-            print ("-------------body-------------")
-            print (body)
-            print ("-------------body-------------")
+            print("-------------body-------------")
+            print(body)
+            print("-------------body-------------")
             print(f"Warning Or Error: {e}")
             print(error_response_code)
             print(error_msg)
 
-        metrics[common_metrics.INTER_TOKEN_LAT] = sum(time_to_next_token) #This should be same as metrics[common_metrics.E2E_LAT]. Leave it here for now
+        metrics[common_metrics.INTER_TOKEN_LAT] = sum(
+            time_to_next_token
+        )  # This should be same as metrics[common_metrics.E2E_LAT]. Leave it here for now
         metrics[common_metrics.TTFT] = ttft
         metrics[common_metrics.E2E_LAT] = total_request_time
         metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = output_throughput

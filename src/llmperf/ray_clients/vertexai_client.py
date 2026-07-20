@@ -27,7 +27,7 @@ class VertexAIClient(LLMClient):
         project_id = os.environ.get("GCLOUD_PROJECT_ID")
         region = os.environ.get("GCLOUD_REGION")
         endpoint_id = os.environ.get("VERTEXAI_ENDPOINT_ID")
-        access_token = os.environ.get("GCLOUD_ACCESS_TOKEN").strip()
+        access_token = os.environ.get("GCLOUD_ACCESS_TOKEN")
         if not project_id:
             raise ValueError("the environment variable GCLOUD_PROJECT_ID must be set.")
         if not region:
@@ -40,6 +40,7 @@ class VertexAIClient(LLMClient):
             raise ValueError(
                 "the environment variable GCLOUD_ACCESS_TOKEN must be set."
             )
+        access_token = access_token.strip()
         prompt = request_config.prompt
         prompt, prompt_len = prompt
 
@@ -54,6 +55,10 @@ class VertexAIClient(LLMClient):
 
         metrics[common_metrics.ERROR_CODE] = None
         metrics[common_metrics.ERROR_MSG] = ""
+
+        # 预置：requests.post 本身抛错（连接/超时/DNS）时 except 分支仍可安全引用，
+        # 否则会触发 UnboundLocalError 掩盖真实异常（H4）。
+        response_code = None
 
         try:
             # Define the URL for the request
@@ -97,7 +102,6 @@ class VertexAIClient(LLMClient):
             metrics[common_metrics.ERROR_MSG] = str(e)
             metrics[common_metrics.ERROR_CODE] = response_code
             print(f"Warning Or Error: {e}")
-            print(response_code)
             print(response_code)
 
         metrics[common_metrics.INTER_TOKEN_LAT] = time_to_next_token
