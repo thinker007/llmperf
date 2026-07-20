@@ -67,6 +67,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stddev-input-tokens", type=int, default=150)
     p.add_argument("--mean-output-tokens", type=int, default=150)
     p.add_argument("--stddev-output-tokens", type=int, default=80)
+    # 开环模式：每秒到达请求数（泊松过程）。不传=闭环；传了之后
+    # --num-concurrent-requests 语义变为最大在途请求数上限（spec 2026-07-20 §5）。
+    p.add_argument("--request-rate", type=float, default=None)
     p.add_argument("--num-concurrent-requests", type=int, default=10)
     p.add_argument("--max-num-completed-requests", type=int, default=10)
     p.add_argument("--timeout", type=int, default=90)
@@ -96,6 +99,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         parser.error("--stddev-input-tokens must be >= 0")
     if args.stddev_output_tokens < 0:
         parser.error("--stddev-output-tokens must be >= 0")
+    if args.request_rate is not None and args.request_rate <= 0:
+        parser.error("--request-rate must be > 0")
 
     config = BenchmarkConfig(
         model=args.model,
@@ -107,12 +112,15 @@ def main(argv: Optional[List[str]] = None) -> None:
         max_num_completed_requests=args.max_num_completed_requests,
         timeout=args.timeout,
         additional_sampling_params=args.additional_sampling_params,
+        request_rate=args.request_rate,
     )
 
     results, wall_clock_s = asyncio.run(run_benchmark(config))
     summary = summarize(results, wall_clock_s)
     summary["model"] = args.model
     summary["num_concurrent_requests"] = args.num_concurrent_requests
+    if args.request_rate is not None:
+        summary["request_rate"] = args.request_rate
     summary["timestamp"] = int(time.time())
     summary["litellm_version"] = getattr(litellm, "__version__", "unknown")
     for k, v in args.metadata.items():

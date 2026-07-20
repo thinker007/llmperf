@@ -75,9 +75,45 @@ def test_metadata_does_not_override_builtin_keys(monkeypatch, capsys):
         ["--mean-output-tokens", "-5"],
         ["--stddev-input-tokens", "-1"],
         ["--stddev-output-tokens", "-1"],
+        # C1（spec 2026-07-20 §5）：开环速率必须为正。
+        ["--request-rate", "0"],
+        ["--request-rate", "-0.5"],
     ],
 )
 def test_main_rejects_non_positive_numeric_args(bad_args):
     with pytest.raises(SystemExit) as exc:
         cli.main(["--model", "m"] + bad_args)
     assert exc.value.code == 2  # parser.error 退出码
+
+
+# ---- 开环速率模式（spec 2026-07-20 §5/§6 C2-C3） ----
+
+
+def test_request_rate_wired_into_config_and_summary(monkeypatch, capsys):
+    # C2：--request-rate 流入 BenchmarkConfig 且 summary 回显。
+    captured = {}
+
+    async def _fake_run_benchmark(config):
+        captured["config"] = config
+        return ([], 0.0)
+
+    monkeypatch.setattr(cli, "run_benchmark", _fake_run_benchmark)
+    cli.main(["--model", "m", "--request-rate", "2.5"])
+    assert captured["config"].request_rate == 2.5
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["request_rate"] == 2.5
+
+
+def test_request_rate_default_none_and_absent_from_summary(monkeypatch, capsys):
+    # C3：不传 → config 为 None，summary 无 request_rate 键（闭环零侵入）。
+    captured = {}
+
+    async def _fake_run_benchmark(config):
+        captured["config"] = config
+        return ([], 0.0)
+
+    monkeypatch.setattr(cli, "run_benchmark", _fake_run_benchmark)
+    cli.main(["--model", "m"])
+    assert captured["config"].request_rate is None
+    summary = json.loads(capsys.readouterr().out)
+    assert "request_rate" not in summary
