@@ -1,6 +1,9 @@
 """runner.py 单测：mock acompletion 异步流式，用 asyncio.run 驱动（无 pytest-asyncio）。"""
 
 import asyncio
+import time
+
+import pytest
 
 from llmperf import common_metrics as cm
 from llmperf.benchmark import runner
@@ -230,6 +233,28 @@ def test_single_request_empty_stream_marked_failed(monkeypatch):
     assert m[cm.NUM_OUTPUT_TOKENS] == 0
 
 
+def _empty_choices_chunk():
+    """模拟 include_usage 末帧：choices=[]，仅带 usage。"""
+
+    class _Chunk:
+        def __init__(self):
+            self.choices = []
+
+    return _Chunk()
+
+
+def test_single_request_survives_usage_only_final_frame(monkeypatch):
+    # H3：开 stream_options.include_usage 时，流末尾会单独发一个 choices=[] 的 usage 帧。
+    # 该帧不得触发 IndexError 把已成功的请求整条误判为失败。
+    chunks = [_chunk(content="Hello"), _chunk(content=" world"), _empty_choices_chunk()]
+    monkeypatch.setattr(runner, "acompletion", _make_acompletion(chunks))
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: len(text.split()))
+
+    m = asyncio.run(runner._single_request(_config(), "p", 3, 50))
+    assert m[cm.ERROR_CODE] is None  # 成功，而非 "unknown"
+    assert m[cm.NUM_OUTPUT_TOKENS] == 2  # "Hello world" 两段保留
+
+
 def test_single_request_status_code_zero_not_swallowed(monkeypatch):
     exc = RuntimeError("boom")
     exc.status_code = 0  # falsy 但合法
@@ -285,6 +310,146 @@ def test_worker_passes_remaining_budget_not_full_timeout(monkeypatch):
     # 透传的单请求 timeout 是"剩余预算"，必 <= 全局 timeout。
     assert captured["timeout"] <= 30
     assert captured["timeout"] > 0
+
+
+# ---- 开环速率模式（spec 2026-07-20 §3/§6 R1-R7） ----
+
+
+def test_arrival_offsets_poisson_schedule(monkeypatch):
+    # R1：首到达为 0；间隔逐个来自 expovariate(rate)；horizon 截断。
+    calls = []
+
+    def _fake_expovariate(rate):
+        calls.append(rate)
+        return 2.0
+
+    monkeypatch.setattr(runner.random, "expovariate", _fake_expovariate)
+    offsets = runner._arrival_offsets(rate=1.5, count=10, horizon=5.0)
+    assert offsets == [0.0, 2.0, 4.0]  # 6.0 越过 horizon=5.0 被截断
+    assert all(c == 1.5 for c in calls)  # 间隔采样传入的是 rate 本身
+
+
+def test_arrival_offsets_count_truncation(monkeypatch):
+    # R1：horizon 充裕时恰好生成 count 个。
+    monkeypatch.setattr(runner.random, "expovariate", lambda rate: 1.0)
+    assert runner._arrival_offsets(rate=1.0, count=3, horizon=1000.0) == [
+        0.0,
+        1.0,
+        2.0,
+    ]
+
+
+def test_open_loop_completes_and_records_sched_delay(monkeypatch):
+    # R2：expovariate→0 全部即刻到达；全部完成且每条记录带 SCHED_DELAY。
+    monkeypatch.setattr(runner, "acompletion", _make_acompletion([_chunk(content="x")]))
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 1)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+    monkeypatch.setattr(runner.random, "expovariate", lambda rate: 0.0)
+
+    results, wall = asyncio.run(
+        runner.run_benchmark(_config(request_rate=100.0, max_num_completed_requests=4))
+    )
+    assert len(results) == 4
+    assert all(cm.SCHED_DELAY in r for r in results)
+    assert all(r[cm.SCHED_DELAY] >= 0 for r in results)
+
+
+def test_open_loop_semaphore_caps_inflight(monkeypatch):
+    # R3：高速率 + 慢请求下，在途数被 num_concurrent_requests 封顶，
+    # 被顶住的请求产生正的调度延迟。
+    state = {"inflight": 0, "peak": 0}
+
+    async def _slow(**body):
+        state["inflight"] += 1
+        state["peak"] = max(state["peak"], state["inflight"])
+        await asyncio.sleep(0.02)
+
+        async def _gen():
+            yield _chunk(content="x")
+            state["inflight"] -= 1
+
+        return _gen()
+
+    monkeypatch.setattr(runner, "acompletion", _slow)
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 1)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+    monkeypatch.setattr(runner.random, "expovariate", lambda rate: 0.0)
+
+    results, _ = asyncio.run(
+        runner.run_benchmark(
+            _config(
+                request_rate=1000.0,
+                num_concurrent_requests=2,
+                max_num_completed_requests=6,
+            )
+        )
+    )
+    assert state["peak"] == 2  # 信号量封顶
+    assert len(results) == 6
+    # 全部同时到达但仅 2 个名额：后到手的必然排过队。
+    assert max(r[cm.SCHED_DELAY] for r in results) > 0
+
+
+def test_dispatch_at_skips_when_budget_exhausted(monkeypatch):
+    # R4：抢到名额时预算已尽 → 不触碰 acompletion、不追加结果（到点停发）。
+    def _boom(**body):
+        raise AssertionError("预算耗尽后不得发射请求")
+
+    monkeypatch.setattr(runner, "acompletion", _boom)
+    results = []
+    sem = asyncio.Semaphore(1)
+    config = _config(timeout=30, request_rate=1.0)
+
+    asyncio.run(
+        runner._dispatch_at(
+            config, "p", 1, 10, 0.0, time.monotonic() - 100.0, sem, results
+        )
+    )
+    assert results == []
+
+
+def test_open_loop_passes_remaining_budget(monkeypatch):
+    # R5：开环透传的单请求 timeout 仍是剩余预算（B2 语义保持）。
+    captured = {}
+    monkeypatch.setattr(
+        runner,
+        "acompletion",
+        _make_capturing_acompletion(captured, [_chunk(content="x")]),
+    )
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 1)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+    monkeypatch.setattr(runner.random, "expovariate", lambda rate: 0.0)
+
+    asyncio.run(
+        runner.run_benchmark(
+            _config(timeout=30, request_rate=10.0, max_num_completed_requests=1)
+        )
+    )
+    assert 0 < captured["timeout"] <= 30
+
+
+def test_closed_loop_results_have_no_sched_delay(monkeypatch):
+    # R6：rate=None 走闭环，结果不含 SCHED_DELAY 键（输出零侵入）。
+    monkeypatch.setattr(runner, "acompletion", _make_acompletion([_chunk(content="x")]))
+    monkeypatch.setattr(runner, "token_counter", lambda model, text: 1)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+
+    results, _ = asyncio.run(
+        runner.run_benchmark(_config(max_num_completed_requests=2))
+    )
+    assert all(cm.SCHED_DELAY not in r for r in results)
+
+
+def test_run_benchmark_rejects_non_positive_rate():
+    # R7：库直调路径（绕过 CLI）传非法速率必须立刻抛 ValueError。
+    with pytest.raises(ValueError):
+        asyncio.run(runner.run_benchmark(_config(request_rate=0.0)))
+    with pytest.raises(ValueError):
+        asyncio.run(runner.run_benchmark(_config(request_rate=-1.5)))
 
 
 def test_worker_derives_shrinking_budget(monkeypatch):

@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,6 +45,9 @@ class BenchmarkConfig:
     max_num_completed_requests: int = 10
     timeout: int = 90
     additional_sampling_params: Dict[str, Any] = field(default_factory=dict)
+    # None=闭环（默认）；>0 = 开环，每秒到达请求数（泊松过程），此时
+    # num_concurrent_requests 语义变为最大在途请求数上限。
+    request_rate: Optional[float] = None
 
 
 async def _single_request(
@@ -81,6 +85,10 @@ async def _single_request(
         start = time.monotonic()
         response = await acompletion(**body)
         async for tok in response:
+            # include_usage 末帧/心跳帧会带空 choices，越过 choices[0] 会抛
+            # IndexError 把已成功的请求整条误判为失败（H3）。
+            if not tok.choices:
+                continue
             delta = tok.choices[0].delta
             if not delta:
                 continue
@@ -107,10 +115,59 @@ async def _single_request(
     }
 
 
+def _arrival_offsets(rate: float, count: int, horizon: float) -> List[float]:
+    """泊松过程到达时刻表（相对压测起点的秒偏移）。
+
+    首个到达在 0 时刻；间隔 ~ Exp(rate)；生成 count 个或越过 horizon 即止
+    （计划到达已超全局预算的请求不生成，对齐闭环"到点不取新任务"语义）。
+    """
+    offsets: List[float] = []
+    t = 0.0
+    for _ in range(count):
+        if t >= horizon:
+            break
+        offsets.append(t)
+        t += random.expovariate(rate)
+    return offsets
+
+
+async def _dispatch_at(
+    config: BenchmarkConfig,
+    prompt_text: str,
+    num_input_tokens: int,
+    sampled_max_tokens: int,
+    arrival_offset: float,
+    start: float,
+    sem: asyncio.Semaphore,
+    results: List[Dict[str, Any]],
+) -> None:
+    """开环单发射：睡到计划到达时刻 → 抢在途名额 → 重查预算 → 发射。
+
+    调度延迟 = 拿到名额时刻 − 计划到达时刻（对所有已发射请求记录，含失败，
+    见 spec §3.4：客户端排队与请求成败无关）。
+    """
+    delay = (start + arrival_offset) - time.monotonic()
+    if delay > 0:
+        await asyncio.sleep(delay)
+    async with sem:
+        now = time.monotonic()
+        elapsed = now - start
+        if elapsed >= config.timeout:
+            return  # 预算已尽不再发射，该到达不产生任何记录。
+        request_timeout = max(0.0, config.timeout - elapsed)
+        m = await _single_request(
+            config, prompt_text, num_input_tokens, sampled_max_tokens, request_timeout
+        )
+        m[cm.SCHED_DELAY] = max(0.0, now - (start + arrival_offset))
+        results.append(m)
+
+
 async def run_benchmark(
     config: BenchmarkConfig,
 ) -> Tuple[List[Dict[str, Any]], float]:
-    """worker-pool 调度。有界队列预填恰好 max 条，N 个 worker 循环取任务。"""
+    """调度入口。request_rate=None 走闭环 worker-pool；>0 走开环泊松发射。"""
+    if config.request_rate is not None and config.request_rate <= 0:
+        raise ValueError("request_rate must be > 0 (or None for closed-loop)")
     queue: asyncio.Queue = asyncio.Queue()
     for _ in range(config.max_num_completed_requests):
         text, n_in = sample_prompt(
@@ -127,6 +184,27 @@ async def run_benchmark(
     results: List[Dict[str, Any]] = []
     started = 0
     start = time.monotonic()
+
+    if config.request_rate is not None:
+        sem = asyncio.Semaphore(config.num_concurrent_requests)
+        offsets = _arrival_offsets(
+            config.request_rate,
+            config.max_num_completed_requests,
+            float(config.timeout),
+        )
+        tasks = []
+        for offset in offsets:
+            text, n_in, max_tokens = queue.get_nowait()
+            tasks.append(
+                asyncio.create_task(
+                    _dispatch_at(
+                        config, text, n_in, max_tokens, offset, start, sem, results
+                    )
+                )
+            )
+        if tasks:
+            await asyncio.gather(*tasks)
+        return results, time.monotonic() - start
 
     async def worker() -> None:
         nonlocal started
