@@ -2,9 +2,9 @@
 
 ## 模块职责
 
-**本模块已完工，并于 2026-07-15 完成一轮"生产可用性硬化"迭代（A1-A4 运行期正确性 + B1-B4 健壮性边界），2026-07-20 新增开环请求速率模式（`--request-rate`，泊松到达 + 在途上限）。57 个测试函数 / pytest 展开 70 例全绿。** `python -m llmperf.benchmark` 是可用的 CLI 入口。
+**本模块已完工，2026-07-15 完成一轮"生产可用性硬化"迭代（A1-A4 运行期正确性 + B1-B4 健壮性边界），2026-07-20 新增开环请求速率模式（`--request-rate`，泊松到达 + 在途上限），2026-07-22 新增 HTTP 直连模式（`--api-base`，绕开 litellm SDK 直连 OpenAI 兼容端点）。** `python -m llmperf.benchmark` 是可用的 CLI 入口。
 
-> 开环模式的设计规格见 `docs/superpowers/specs/2026-07-20-benchmark-open-loop-design.md`、实施计划见 `docs/superpowers/plans/2026-07-20-benchmark-open-loop.md`。不传 `--request-rate` 时闭环行为与输出结构完全不变。
+> 开环模式设计规格见 `docs/superpowers/specs/2026-07-20-benchmark-open-loop-design.md`、实施计划见 `.../plans/2026-07-20-benchmark-open-loop.md`；HTTP 直连模式设计规格见 `.../specs/2026-07-22-benchmark-http-direct-mode-design.md`、实施计划见 `.../plans/2026-07-22-benchmark-http-direct-mode.md`。不传 `--request-rate`/`--api-base` 时行为与输出结构完全不变。
 
 > 硬化迭代的设计规格见 `docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`、实施计划见 `docs/superpowers/plans/2026-07-15-benchmark-production-hardening.md`。本轮引入两处**有意的语义变更**：(A3) 空流从"成功"改判为 `empty_response` 错误；(B2) 单请求 HTTP 超时从"固定 `config.timeout`"改为"剩余预算 `config.timeout − 已用时`"。
 
@@ -25,6 +25,7 @@
 | `src/llmperf/benchmark/metrics.py` | **已完成**（Task 2） |
 | `src/llmperf/benchmark/runner.py` | **已完成**（Task 3） |
 | `src/llmperf/benchmark/__main__.py` | **已完成**（Task 4） |
+| `src/llmperf/benchmark/http_client.py` | **已完成**（HTTP 直连模式，2026-07-22） |
 | `tests/test_benchmark_prompts.py` | **已完成** — 4 用例 |
 | `tests/test_benchmark_metrics.py` | **已完成** — 14 用例（+A3 空流） |
 | `tests/test_benchmark_runner.py` | **已完成** — 17 用例（+A1/A2/A4/B2 硬化 + 非 dict 采样参数不逃逸） |
@@ -86,9 +87,21 @@ def _get(delta: Any, key: str) -> Optional[str]          # dict 用 .get，pydan
 def extract_content(delta: Any) -> Optional[str]         # reasoning_content or content，任一缺失/异型都不炸
 # 开环模式（2026-07-20）：
 def _arrival_offsets(rate: float, count: int, horizon: float) -> List[float]  # 泊松到达时刻表（纯函数）
-async def _dispatch_at(config, text, n_in, max_tokens, offset, start, sem, results) -> None
+async def _dispatch_at(config, text, n_in, max_tokens, offset, start, sem, results, executor=None) -> None
+# HTTP 直连模式（2026-07-22）：
+def _build_body(config, prompt_text, sampled_max_tokens) -> Dict[str, Any]  # 两条后端共用请求体（纯函数）
 ```
+
+### `http_client.py`（HTTP 直连模式，2026-07-22 新增）
+```python
+def parse_sse_line(raw_line: bytes) -> Optional[Dict[str, Any]]     # 'data: {...}' -> dict；[DONE]/空行/非data行 -> None
+def extract_delta_text(data: Dict[str, Any]) -> Optional[str]       # choices[0].delta 取文本，choices=[] 安全返回 None（H3 同款）
+def single_request_sync(model, api_base, api_key_env, num_input_tokens, request_timeout, body) -> Dict[str, Any]
+```
+- `single_request_sync` 是唯一含 I/O 的入口：`requests.post(..., stream=True)` + 逐行 SSE 解析，**全程自洽 try/except，绝不外抛**（与 `_single_request` 的 A2 契约一致）。刻意保持完全同步——它总是在线程池里执行（见下），函数体内不做任何 asyncio 操作。
+- `token_counter`（复用 litellm）对 litellm 不识别的 model 名仍有 `cl100k_base` 兜底编码器，HTTP 路径的 token 计数口径与 litellm 路径一致，无需第二套分词逻辑。
 - **开环速率模式（2026-07-20）**：`BenchmarkConfig.request_rate` 非 `None`（须 > 0，否则 `run_benchmark` 抛 `ValueError`）时走开环分支——`_arrival_offsets` 生成泊松到达时刻表（首到达 0 时刻、间隔 `random.expovariate(rate)`、越过 `timeout` horizon 截断），每个到达一个 `_dispatch_at` task：睡到计划时刻 → `Semaphore(num_concurrent_requests)` 抢在途名额 → 拿到名额后重查全局预算（已尽则不发射、不产生记录）→ 发射并在结果里记 `SCHED_DELAY`（实际发出 − 计划到达，**对含失败的全部已发射请求记录**，客户端排队与成败无关）。闭环分支代码原样保留，闭环结果不带 `SCHED_DELAY` 键。
+- **HTTP 直连模式（2026-07-22）**：`BenchmarkConfig.api_base` 非 `None` 时，`_single_request` 分发给 `http_client.single_request_sync`（同步函数），经 `loop.run_in_executor(executor, ...)` 桥接进 asyncio；`executor` 是 `run_benchmark` 按需创建的**专属** `ThreadPoolExecutor(max_workers=num_concurrent_requests)`（`finally` 块里 `shutdown(wait=False)`），不依赖/受限于 asyncio 全局默认 executor（容量固定 `min(32, cpu+4)`）。闭环 `worker()` 与开环 `_dispatch_at` 都把这个 executor 透传给 `_single_request`（`executor=None` 时行为等价于原来——落到默认 executor，但只有 `api_base` 设置时才会真正跑到这条分支）。两条后端共用的请求体构造抽成 `_build_body`（纯函数，供 litellm/HTTP 两条路径各自在自己的 try 块里调用，保持 A2"非 dict 采样参数不逃逸"契约在两条路径上都成立）。
 - **并发模型（闭环默认）：worker-pool，钉死不用 `gather` 批处理**。`run_benchmark` 预生成恰好 `max_num_completed_requests` 条 prompt 放进有界 `asyncio.Queue`，`num_concurrent_requests` 个常驻协程各自死循环 `queue.get_nowait()` 取任务，任一请求完成立刻取下一个。这直接避免了旧 Ray 路线历史上真实踩过的 `#59` bug（commit `f1d6bed`）——"凑够一批再一起等"的语义下，在途请求数会从 N 塌陷到 1 再回弹，拖慢吞吐。`tests/test_benchmark_runner.py::test_run_benchmark_concurrency_stays_at_n` 专门验证"队列有货时持续保持 == N"（不只是"峰值 ≤ N"这种弱断言）。
 - **`--timeout` 与单请求超时（B2 硬化）**：`--timeout` 到点后 worker 停止取新任务，但不 cancel 在途请求，等其自然完成后计入统计。给 `acompletion` 透传的 HTTP 层 `timeout` **不再是固定的 `config.timeout`**，而是 worker 每次取任务前算出的**剩余预算** `max(0.0, config.timeout − elapsed)`（`elapsed` 由单次 `time.monotonic()` 采样得出）。这样单个慢请求最多拖到整体预算耗尽，而不是在预算末尾还能再独占一整个 `config.timeout`。`_single_request` 的 `request_timeout` 参数为 `None` 时回退到 `config.timeout`（保持库直调时的旧行为）。守护测试：`test_worker_derives_shrinking_budget`（monotonic 前进 → 断言 `0 < 透传 timeout < config.timeout`，能抓住"退回固定 config.timeout"的回归）。
 - **`_single_request` 绝不让异常逃逸（A2 硬化）**：流式采集骨架照搬 `ray_clients/litellm_client.py:61-103`（只把同步 `for` 换成 `async for`），整个请求生命周期包在 `try/except Exception as e` 内，`num_output_tokens`/`token_counter` 计费也移进 `try`——任何环节抛错都被就地转成一条带 `error_code`/`error_msg` 的 result dict 返回，**不会**冒泡到 worker 协程把整个池带崩。
@@ -133,7 +146,8 @@ summarize 输出：
 BenchmarkConfig: model, mean_input_tokens=550, stddev_input_tokens=150,
                  mean_output_tokens=150, stddev_output_tokens=80,
                  num_concurrent_requests=10, max_num_completed_requests=10,
-                 timeout=90, additional_sampling_params={}, request_rate=None
+                 timeout=90, additional_sampling_params={}, request_rate=None,
+                 api_base=None, api_key_env="OPENAI_API_KEY"
 run_benchmark(config) -> (results: List[Dict], wall_clock_s: float)
 ```
 
@@ -150,10 +164,11 @@ run_benchmark(config) -> (results: List[Dict], wall_clock_s: float)
 |---|---|---|
 | `tests/test_benchmark_prompts.py` | 5 | 高斯重采样必为正数、`sample_output_len` 恒正、`sample_prompt` 口径自洽、小均值场景下的收敛性（含 `stddev=0` 边界，曾在实现时触发死循环 bug）、**`mean<=0` 快速失败抛 `ValueError`（M2，参数化 ×3）** |
 | `tests/test_benchmark_metrics.py` | 16 | 换算正确性、`_safe_div`/`_safe_stdev`/`_safe_quantiles` 全部除零与 n<2 边界、`summarize` 成功/失败分流、全失败场景、`wall_clock_s==0`、`error_code` 类型归一为 `str`、**空流计为 `empty_response` 错误（A3）**、**开环 `scheduling_delay_s` 统计块与 `achieved_requests_per_s`（含错误请求计入）+ 闭环无新键（开环 M1-M2）** |
-| `tests/test_benchmark_runner.py` | 26 | TTFT/文本采集、**`extract_content` 四种 delta 形态（A1）**、`reasoning_content` 计入、错误从异常真实提取、**异常绝不逃逸（A2）**、**`status_code==0` 保留（A4）**、有界队列软上限、**worker-pool 并发稳定性**（峰值==N 且持续保持==N，不塌陷）、**单请求超时=剩余预算且随耗时收缩（B2）**、**库直调非 dict 采样参数转失败记录不逃逸（评审 finding #1）**、**开环 R1-R7**（泊松时刻表/horizon 与 count 截断、发射链路记调度延迟、信号量封顶在途、预算尽不发射、剩余预算保持、闭环无 `SCHED_DELAY` 键、非正速率抛 `ValueError`） |
-| `tests/test_benchmark_cli.py` | 10 | `--metadata` 解析（`split("=",1)`、重复 key 覆盖）、**缺 `=` 抛 `ArgumentTypeError`（B1）**、文件名清洗、非法 JSON 报错退出、**内建键不被 metadata 覆盖并告警（B3）**、**非正数值参数以退出码 2 拒绝（B4+M2+开环 C1，参数化 ×9）**、**`--additional-sampling-params` 合法 JSON 但非对象以退出码 2 拒绝（参数化 ×4，评审 finding #1）**、**`--request-rate` 接线与回显 + 默认闭环零侵入（开环 C2-C3）** |
+| `tests/test_benchmark_runner.py` | 31 | TTFT/文本采集、**`extract_content` 四种 delta 形态（A1）**、`reasoning_content` 计入、错误从异常真实提取、**异常绝不逃逸（A2）**、**`status_code==0` 保留（A4）**、有界队列软上限、**worker-pool 并发稳定性**（峰值==N 且持续保持==N，不塌陷）、**单请求超时=剩余预算且随耗时收缩（B2）**、**库直调非 dict 采样参数转失败记录不逃逸（评审 finding #1）**、**开环 R1-R7**（泊松时刻表/horizon 与 count 截断、发射链路记调度延迟、信号量封顶在途、预算尽不发射、剩余预算保持、闭环无 `SCHED_DELAY` 键、非正速率抛 `ValueError`）、**HTTP 直连 T3/T8/T9/T10**（`_build_body` 两路径同形、`api_base` 设置时不触碰 `acompletion` 且转发给 `http_client`、闭环+开环各一次端到端假 HTTP 后端、专属线程池峰值并发==N 不被全局 executor 封顶） |
+| `tests/test_benchmark_cli.py` | 12 | `--metadata` 解析（`split("=",1)`、重复 key 覆盖）、**缺 `=` 抛 `ArgumentTypeError`（B1）**、文件名清洗、非法 JSON 报错退出、**内建键不被 metadata 覆盖并告警（B3）**、**非正数值参数以退出码 2 拒绝（B4+M2+开环 C1，参数化 ×9）**、**`--additional-sampling-params` 合法 JSON 但非对象以退出码 2 拒绝（参数化 ×4，评审 finding #1）**、**`--request-rate` 接线与回显 + 默认闭环零侵入（开环 C2-C3）**、**`--api-base`/`--api-key-env` 接线与 `backend`/`api_base` 回显 + 默认 litellm 零侵入（HTTP 直连 T11）** |
+| `tests/test_benchmark_http_client.py` | 10 | SSE 分帧（`parse_sse_line`）、delta 提取（`extract_delta_text`，含空 `choices` 安全返回 None，H3 同款）、`single_request_sync` 全路径（happy path / 非 200 状态码+响应体 / 网络异常不逃逸 / 空流判 `empty_response` / 缺失 `api_key_env` 环境变量时告警且不带鉴权头继续） |
 
-全部 57 个测试函数（pytest 展开 70 例）无需网络（`prompts`/`metrics` 是纯函数；`runner`/`cli` 用 `monkeypatch` 注入假的 `acompletion`/`token_counter`）。运行：
+全部 74 个测试函数（pytest 展开 87 例）无需网络（`prompts`/`metrics` 是纯函数；`runner`/`cli` 用 `monkeypatch` 注入假的 `acompletion`/`token_counter`）。运行：
 ```bash
 python -m pytest tests/test_benchmark_prompts.py tests/test_benchmark_metrics.py tests/test_benchmark_runner.py tests/test_benchmark_cli.py -v
 ```
@@ -177,17 +192,21 @@ python -m pytest tests/test_benchmark_prompts.py tests/test_benchmark_metrics.py
 - `src/llmperf/benchmark/metrics.py`
 - `src/llmperf/benchmark/runner.py`
 - `src/llmperf/benchmark/__main__.py`
+- `src/llmperf/benchmark/http_client.py`
 - `src/llmperf/benchmark/sonnet.txt`
 - `tests/test_benchmark_prompts.py`
 - `tests/test_benchmark_metrics.py`
 - `tests/test_benchmark_runner.py`
 - `tests/test_benchmark_cli.py`
+- `tests/test_benchmark_http_client.py`
 - `docs/benchmark.md`（用户文档）
 - `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`（设计规格）
 - `docs/superpowers/plans/2026-06-28-litellm-benchmark-integration-plan.md`（实施计划，已全部完成）
 
 ## 变更记录 (Changelog)
 
+- 2026-07-25（Warmup 请求）：新增 `--num-warmup-requests N` / `BenchmarkConfig.num_warmup_requests`——正式测量前先闭环发 N 条 warmup 请求，指标整条丢弃、且测量相 wall-clock 起点后移到 warmup 之后（warmup 耗时不进吞吐/达成速率分母），排除冷启动对分位数的污染。warmup 一律闭环（即便测量走开环/HTTP 直连），复用抽出的 `_closed_loop()` + `_build_prompt_queue()`（DRY），顺手删死变量 `started`。`N=0`（默认）逐字节等价现状；summary 仅 `N>0` 时回显 `num_warmup_requests`；`metrics.py` 零改动。**前置 Task 0**：`pyproject.toml` 给 litellm 补 `<1.62` 上界修复与 `pydantic<2.5` 的冲突（此前 `import litellm` 挂 `Discriminator`），恢复绿基线。测试 90 → 116 例（runner +6、cli +2）。规格 `docs/superpowers/specs/2026-07-25-benchmark-warmup-requests-design.md`、计划 `.../plans/2026-07-25-benchmark-warmup-requests.md`。
+- 2026-07-22（HTTP 直连模式）：新增 `--api-base`/`BenchmarkConfig.api_base`——绕开 litellm SDK，`http_client.py` 用 `requests` 直连 OpenAI 兼容 `/chat/completions` 流式端点、手工解析 SSE（含 H3 同款空 `choices` 守卫）。`requests`（同步）经专属 `ThreadPoolExecutor`（尺寸=`num_concurrent_requests`）桥接进 asyncio，不依赖/受限于全局默认 executor 的 32 容量上限。`runner.py` 抽出共享的 `_build_body` 供两条后端复用，`_single_request` 改为薄分发层，闭环/开环调度代码零改动（只多透传一个 `executor` 参数）。summary 新增 `backend`（始终写入）与 `api_base`（设置时写入）两键。不传 `--api-base` 时 litellm 路径行为与输出结构零变化。测试 57 → 74 个函数（pytest 87 例）。
 - 2026-07-20（开环请求速率模式）：新增 `--request-rate` / `BenchmarkConfig.request_rate`——泊松到达（`_arrival_offsets` 纯函数时刻表 + `_dispatch_at` 发射协程）+ `Semaphore` 在途上限 + 每请求 `scheduling_delay_s` + summary 条件追加 `scheduling_delay_s` 统计块与 `achieved_requests_per_s`。闭环（默认）行为与输出结构零变化。同轮收口上一迭代遗留的 M2 半成品（`sample_random_positive_int` 的 `mean<=0` 快速失败 + CLI 层 mean/stddev 校验）。测试 43 → 57 个函数（pytest 70 例）。
 - 2026-07-15（生产可用性硬化 A+B）：完成 8 项硬化 + 文档同步（SDD 子代理驱动）。**A 簇 运行期正确性**：A1 抽出防御式 `extract_content`（兼容 dict/pydantic delta）；A2 `_single_request` 全生命周期包 try，异常绝不逃逸出 worker 池；A3 空流改判为 `empty_response` 错误（语义变更）；A4 保留合法 `status_code==0` 不再误吞为 `"unknown"`。**B 簇 健壮性边界**：B1 `--metadata` 缺 `=` 走 argparse 友好报错（退出码 2）；B2 单请求 HTTP 超时改为剩余预算 `config.timeout − elapsed`（语义变更，含强断言守护测试）；B3 内建汇总键优先于 `--metadata`、撞名跳过并 stderr 告警；B4 `--num-concurrent-requests`/`--max-num-completed-requests`/`--timeout` 非正值以退出码 2 拒绝。测试 26 → 43 个函数（pytest 48 例）。仅两处语义变更（A3、B2）跨路线对比时需注意。
 - 2026-07-15（最终全分支评审收口）：评审 verdict READY TO MERGE，唯一 Important finding #1——A2 的"异常绝不逃逸"还漏了 `body.update(additional_sampling_params)` 在 try 之外这一条 setup 路径（非对象采样参数会抛 `TypeError` 逃逸）。按"两者都做"修复：解析期 `parse_json_dict` 校验必须为 JSON 对象（退出码 2）+ 运行时把 `body.update` 移进 `try` 兜底库直调方。新增 2 个测试函数（cli 8、runner 17）。提交 `8bda166`。

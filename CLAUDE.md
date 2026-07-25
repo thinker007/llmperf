@@ -11,7 +11,7 @@
 项目由两条并行的技术路线组成：
 
 1. **成熟的 Ray 压测路线**（`token_benchmark_ray.py` + `llm_correctness.py` + `src/llmperf/`）：以 Ray Actor 作为并发原语，`RequestsLauncher` 通过 `ActorPool` 派发请求，多线程（`threading.Thread`）驱动多个 Actor 池并行工作，使用固定的 Llama 分词器保证跨模型 token 计数口径一致。这是当前**唯一可用、可跑通**的压测入口。
-2. **轻量 asyncio 压测路线**（`src/llmperf/benchmark/`）：用 `asyncio` worker-pool 直接压 `litellm.acompletion()`，去掉 Ray/threading/pandas/transformers 等重脚手架，与 Ray 路线并存、零侵入。**已完工，2026-07-15 完成生产可用性硬化**（A1-A4 运行期正确性 + B1-B4 健壮性边界），**2026-07-20 新增开环请求速率模式**（`--request-rate`，泊松到达 + 在途上限，57 个测试函数 / pytest 70 例全绿），`python -m llmperf.benchmark` 是可用的 CLI 入口。完整设计见 `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`（原始）、`.../2026-07-15-benchmark-production-hardening-design.md`（硬化）与 `.../2026-07-20-benchmark-open-loop-design.md`（开环模式）、实施计划见对应 plan 文档、用户文档见 `docs/benchmark.md`。
+2. **轻量 asyncio 压测路线**（`src/llmperf/benchmark/`）：用 `asyncio` worker-pool 直接压 `litellm.acompletion()`，去掉 Ray/threading/pandas/transformers 等重脚手架，与 Ray 路线并存、零侵入。**已完工，2026-07-15 完成生产可用性硬化**（A1-A4 运行期正确性 + B1-B4 健壮性边界），**2026-07-20 新增开环请求速率模式**（`--request-rate`，泊松到达 + 在途上限），**2026-07-22 新增 HTTP 直连模式**（`--api-base`，绕开 litellm SDK 直连 OpenAI 兼容端点，74 个测试函数 / pytest 87 例全绿），`python -m llmperf.benchmark` 是可用的 CLI 入口。完整设计见 `docs/superpowers/specs/2026-06-28-litellm-benchmark-integration-design.md`（原始）、`.../2026-07-15-benchmark-production-hardening-design.md`（硬化）、`.../2026-07-20-benchmark-open-loop-design.md`（开环模式）与 `.../2026-07-22-benchmark-http-direct-mode-design.md`（HTTP 直连模式）、实施计划见对应 plan 文档、用户文档见 `docs/benchmark.md`。
 
 两条路线共享同一套指标常量命名（`src/llmperf/common_metrics.py`），但**指标口径不完全一致**（尤其是 Inter-Token Latency 的计算公式在新路线里被有意修正，`metrics.py` 中已实际生效，见 `src/llmperf/benchmark/CLAUDE.md`），使用时注意不要跨路线直接对比数字。
 
@@ -38,9 +38,12 @@ graph TD
 |---|---|---|---|
 | `src/llmperf` | 核心框架：`RequestConfig` 数据模型、指标常量、`LLMClient` 抽象接口、`RequestsLauncher` 调度、`utils.py` 工具函数；以及紧密耦合的两个入口脚本 `token_benchmark_ray.py`（性能压测）与 `llm_correctness.py`（正确性校验，位于仓库根目录） | Python | [详见](./src/llmperf/CLAUDE.md) |
 | `src/llmperf/ray_clients` | 5 个 Ray Actor 客户端：OpenAI / Anthropic（原生）/ LiteLLM（万能兜底）/ SageMaker / VertexAI | Python | [详见](./src/llmperf/ray_clients/CLAUDE.md) |
-| `src/llmperf/benchmark` | 轻量 asyncio 压测子模块，**已完工 + 生产硬化 + 开环速率模式**：prompt 采样、指标聚合、闭环 worker-pool 与开环泊松发射双引擎、CLI 全部就绪，57 个测试函数（pytest 70 例）全绿 | Python | [详见](./src/llmperf/benchmark/CLAUDE.md) |
+| `src/llmperf/benchmark` | 轻量 asyncio 压测子模块，**已完工 + 生产硬化 + 开环速率模式 + HTTP 直连模式**：prompt 采样、指标聚合、闭环 worker-pool / 开环泊松发射 / HTTP 直连三种发射方式、CLI 全部就绪，74 个测试函数（pytest 87 例）全绿 | Python | [详见](./src/llmperf/benchmark/CLAUDE.md) |
 | `tests` | pytest 单元测试，均为纯函数级测试（不连真实网络、不起 Ray） | Python | [详见](./tests/CLAUDE.md) |
 | `docs/superpowers` | `benchmark` 子模块的设计规划文档（Markdown 计划书 + 设计规格），非代码 | Markdown | 不生成独立模块 CLAUDE.md，理由见下 |
+| `docs/code-summary.md` | **代码级总结导读**：逐模块讲清"每段代码做什么/为什么这么写/坑在哪"，含两路线对比、指标口径差异表、5 条工程经验，与本文件（AI 架构索引）互补不重复 | Markdown | [详见](./docs/code-summary.md) |
+| `docs/overview.md` | **使用者速览**（What/How-to-use）：能测什么(5 指标)、两路线怎么选、Ray/benchmark 命令+参数速查、三种模式(闭环/开环/HTTP 直连)、怎么读 JSON 输出、三个必踩坑。面向"拿来用"的人，不讲内部实现 | Markdown | [详见](./docs/overview.md) |
+| `docs/dev-guide.md` | **新贡献者上手指南**（Where/How-to-extend）：五分钟项目地图、唯一必记契约(三元组+注册表)、如何加一个厂商(两文件零改动)、测试怎么写、4 条编码红线、TDD 流程、审计待办练手点。面向"要改代码"的人 | Markdown | [详见](./docs/dev-guide.md) |
 | `.traces` | 运行期产生的 trace 日志（`.jsonl`/`.log`/`.html`） | - | 运行期产物，不生成文档 |
 | `result_outputs` | 压测结果 JSON 落盘目录（`.gitignore` 中已忽略） | - | 运行期产物，不生成文档 |
 | `.venv` | Python 虚拟环境（第三方依赖安装目录） | - | 不属于项目源码，完全跳过扫描 |
@@ -112,6 +115,9 @@ python -m pytest tests/ -v
 
 ## 变更记录 (Changelog)
 
+- 2026-07-25（benchmark Warmup 请求）：新增 `--num-warmup-requests N`——测量前先闭环发 N 条预热请求把被测端打到稳态，指标整条丢弃、且测量 wall-clock 起点后移到 warmup 之后（不进吞吐分母），排除冷启动对分位数的污染。warmup 一律闭环（叠加开环/HTTP 直连亦然），抽出 `_closed_loop()`+`_build_prompt_queue()` 复用（DRY），删死变量 `started`；`N=0` 默认逐字节等价现状，`metrics.py` 零改动。修复前置阻塞：`pyproject.toml` 给 litellm 补 `<1.62` 上界解决与 `pydantic<2.5` 的冲突（`import litellm` 曾挂 `Discriminator`）。TDD 四提交（Task 0 依赖 / Task 1 runner / Task 2 CLI / Task 3 文档），测试 90 → 116 例全绿。规格+计划见 `docs/superpowers/{specs,plans}/2026-07-25-benchmark-warmup-requests*`。
+- 2026-07-25（文档换视角补齐）：在既有 `docs/code-summary.md`（代码级导读）基础上，按"使用者/贡献者"两个新视角补两份互补文档——`docs/overview.md`（使用者速览：5 指标、两路线选型、三种模式命令+参数速查、输出解读、三坑）与 `docs/dev-guide.md`（贡献者上手：项目地图、三元组+注册表契约、加厂商两文件零改动流程、测试约定、编码红线、TDD、审计待办）。所有 CLI 参数/接口契约均从 `__main__.py`/`token_benchmark_ray.py`/`ray_llm_client.py`/`common.py` 实读核对，三份文档 DRY 互补、交叉处以「详见」互指、不重复实现细节。已登记进上方模块索引。
+- 2026-07-22（benchmark HTTP 直连模式 + 全项目 review）：多子代理并行审查 Ray 路线/benchmark 子模块/核心框架/测试文档一致性，确证并修复 6 高 9 中若干低危问题（详见各子模块 CLAUDE.md changelog：OpenAI 客户端 ITL 测量错误、VertexAI 变量未初始化、`utils.py` 导入期 tokenizer 加载、`runner.py` usage-only 空帧误判失败、两处死循环、`RequestsLauncher` 空池热自旋、`SUPPORTED_APIS` 注册表漂移、两份缺失的模块文档）。之后新增 `benchmark` 开环请求速率模式（`--request-rate`）与 HTTP 直连模式（`--api-base`，绕开 litellm SDK 直连 OpenAI 兼容端点、专属线程池桥接），测试从 55 例增至全仓 90 函数 / 104 例。核实此前记录的"pydantic 环境债"已不复现（当前环境 pydantic 2.4.2 + litellm 1.61.13 全绿），未做无必要的依赖升级。
 - 2026-07-15（benchmark 生产可用性硬化 A+B）：在 `src/llmperf/benchmark/` 上叠加 8 项硬化（SDD 子代理驱动，逐任务评审）。A 簇运行期正确性：A1 防御式 `extract_content`、A2 `_single_request` 异常绝不逃逸、A3 空流判 `empty_response`、A4 保留 `status_code==0`；B 簇健壮性边界：B1 `--metadata` 缺 `=` 友好报错、B2 单请求超时=剩余预算、B3 内建汇总键优先于 `--metadata`、B4 数值参数非正值以退出码 2 拒绝。测试 26 → 43 个函数（pytest 48 例）。同步更新根/子模块 CLAUDE.md、`docs/benchmark.md`、spec/plan 状态。设计规格 `docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`、计划 `.../plans/2026-07-15-benchmark-production-hardening.md`。**两处有意语义变更**（A3 空流、B2 超时），跨路线对比数字时注意。
 - 2026-07-05（第三次扫描）：`src/llmperf/benchmark/` 完工——`runner.py`（asyncio worker-pool 并发引擎，修正原代码错误吞噬 bug）、`__main__.py`/`__init__.py`（CLI 入口）全部落地，加上 `docs/benchmark.md` 用户文档，5 个 Task、26 个测试全绿。同时修复了从 `utils.py` 移植时带过来的一个既有死循环 bug（`prompts.py::sample_prompt` 在 `stddev=0` 且 `mean` 小于基底前缀长度时会挂死，测试运行时才被发现）。计划文档 checkbox 已回填。
 - 2026-07-05（第二次扫描）：核实发现 `src/llmperf/benchmark/metrics.py` 与 `tests/test_benchmark_metrics.py` 已实际存在（此前记录为"未创建"），更新架构总览、模块索引表与 AI 使用指引中的相关措辞；确认 `src/llmperf/ray_clients/CLAUDE.md`、`src/llmperf/benchmark/CLAUDE.md`、`tests/CLAUDE.md`、`.claude/index.json` 均已存在并已增量更新（详见各自文件的变更记录）。
