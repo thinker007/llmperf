@@ -78,12 +78,53 @@ def test_metadata_does_not_override_builtin_keys(monkeypatch, capsys):
         # C1（spec 2026-07-20 §5）：开环速率必须为正。
         ["--request-rate", "0"],
         ["--request-rate", "-0.5"],
+        # W1（spec 2026-07-25 §5）：warmup 数为负无意义。
+        ["--num-warmup-requests", "-1"],
     ],
 )
 def test_main_rejects_non_positive_numeric_args(bad_args):
     with pytest.raises(SystemExit) as exc:
         cli.main(["--model", "m"] + bad_args)
     assert exc.value.code == 2  # parser.error 退出码
+
+
+# ---- HTTP 直连模式（spec 2026-07-22 §5/§6 T11） ----
+
+
+def test_api_base_wired_into_config_and_summary(monkeypatch, capsys):
+    captured = {}
+
+    async def _fake_run_benchmark(config):
+        captured["config"] = config
+        return ([], 0.0)
+
+    monkeypatch.setattr(cli, "run_benchmark", _fake_run_benchmark)
+    cli.main(
+        [
+            "--model",
+            "m",
+            "--api-base",
+            "http://localhost:8000/v1",
+            "--api-key-env",
+            "MY_KEY",
+        ]
+    )
+    assert captured["config"].api_base == "http://localhost:8000/v1"
+    assert captured["config"].api_key_env == "MY_KEY"
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["backend"] == "http"
+    assert summary["api_base"] == "http://localhost:8000/v1"
+
+
+def test_no_api_base_defaults_to_litellm_backend(monkeypatch, capsys):
+    async def _fake_run_benchmark(config):
+        return ([], 0.0)
+
+    monkeypatch.setattr(cli, "run_benchmark", _fake_run_benchmark)
+    cli.main(["--model", "m"])
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["backend"] == "litellm"
+    assert "api_base" not in summary
 
 
 # ---- 开环速率模式（spec 2026-07-20 §5/§6 C2-C3） ----
@@ -117,3 +158,36 @@ def test_request_rate_default_none_and_absent_from_summary(monkeypatch, capsys):
     assert captured["config"].request_rate is None
     summary = json.loads(capsys.readouterr().out)
     assert "request_rate" not in summary
+
+
+# ---- Warmup 请求（spec 2026-07-25 §5/§6 T7） ----
+
+
+def test_num_warmup_requests_wired_into_config_and_summary(monkeypatch, capsys):
+    # T7：--num-warmup-requests 流入 config 且 N>0 时 summary 回显。
+    captured = {}
+
+    async def _fake_run_benchmark(config):
+        captured["config"] = config
+        return ([], 0.0)
+
+    monkeypatch.setattr(cli, "run_benchmark", _fake_run_benchmark)
+    cli.main(["--model", "m", "--num-warmup-requests", "3"])
+    assert captured["config"].num_warmup_requests == 3
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["num_warmup_requests"] == 3
+
+
+def test_num_warmup_requests_default_zero_absent_from_summary(monkeypatch, capsys):
+    # T7：不传 → config 为 0，summary 无 num_warmup_requests 键（N=0 零侵入）。
+    captured = {}
+
+    async def _fake_run_benchmark(config):
+        captured["config"] = config
+        return ([], 0.0)
+
+    monkeypatch.setattr(cli, "run_benchmark", _fake_run_benchmark)
+    cli.main(["--model", "m"])
+    assert captured["config"].num_warmup_requests == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert "num_warmup_requests" not in summary
