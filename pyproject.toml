@@ -15,7 +15,7 @@ dependencies = ["pydantic<2.5",
                 "seaborn>=0.11", 
                 "awscli>=1.22", 
                 "typer>=0.4", 
-                "litellm>=0.1.738", 
+                "litellm>=0.1.738,<1.62",  # 上界: litellm>=1.62 需 pydantic>=2.5，与上面 pydantic<2.5 冲突
                 "num2words",
                 "transformers",
                 "tqdm",
