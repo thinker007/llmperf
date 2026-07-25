@@ -480,3 +480,326 @@ def test_worker_derives_shrinking_budget(monkeypatch):
     )
     # elapsed 已 > 0，故透传 timeout 必严格小于全局 30，且仍为正。
     assert 0 < captured["timeout"] < 30
+
+
+# ---- HTTP 直连模式（spec 2026-07-22 §3/§6 T3/T8/T9/T10） ----
+
+
+def test_build_body_matches_litellm_shape():
+    # T3：_build_body 是两条后端共用的唯一请求体来源，字段须与现状一致。
+    body = runner._build_body(
+        _config(additional_sampling_params={"temperature": 0.5}), "p", 42
+    )
+    assert body["model"] == "gpt-4o"
+    assert body["messages"] == [
+        {"role": "system", "content": ""},
+        {"role": "user", "content": "p"},
+    ]
+    assert body["stream"] is True
+    assert body["max_tokens"] == 42
+    assert body["temperature"] == 0.5
+    assert "timeout" not in body  # timeout 由各自路径单独附加，不进 JSON body
+
+
+def test_single_request_dispatches_to_http_when_api_base_set(monkeypatch):
+    # T8：api_base 设置时不得触碰 acompletion，须转发给 http_client。
+    def _boom_acompletion(**body):
+        raise AssertionError("api_base 设置时不应调用 litellm.acompletion")
+
+    monkeypatch.setattr(runner, "acompletion", _boom_acompletion)
+
+    captured = {}
+
+    def _fake_sync(model, api_base, api_key_env, num_input_tokens, timeout, body):
+        captured.update(
+            model=model,
+            api_base=api_base,
+            api_key_env=api_key_env,
+            num_input_tokens=num_input_tokens,
+            timeout=timeout,
+        )
+        return {
+            cm.TTFT: 0.05,
+            cm.E2E_LAT: 0.2,
+            cm.NUM_INPUT_TOKENS: num_input_tokens,
+            cm.NUM_OUTPUT_TOKENS: 3,
+            cm.ERROR_CODE: None,
+            cm.ERROR_MSG: "",
+        }
+
+    monkeypatch.setattr(runner.http_client, "single_request_sync", _fake_sync)
+
+    config = _config(api_base="http://localhost:8000/v1", api_key_env="MY_KEY")
+    m = asyncio.run(runner._single_request(config, "p", 7, 50))
+    assert m[cm.ERROR_CODE] is None
+    assert m[cm.NUM_OUTPUT_TOKENS] == 3
+    assert captured["api_base"] == "http://localhost:8000/v1"
+    assert captured["api_key_env"] == "MY_KEY"
+    assert captured["num_input_tokens"] == 7
+
+
+def test_run_benchmark_closed_loop_http_backend(monkeypatch):
+    # T9：闭环端到端配合假 HTTP 后端，管线（queue/worker/结果收集）零改动可用。
+    def _fake_sync(model, api_base, api_key_env, num_input_tokens, timeout, body):
+        return {
+            cm.TTFT: 0.01,
+            cm.E2E_LAT: 0.02,
+            cm.NUM_INPUT_TOKENS: num_input_tokens,
+            cm.NUM_OUTPUT_TOKENS: 2,
+            cm.ERROR_CODE: None,
+            cm.ERROR_MSG: "",
+        }
+
+    monkeypatch.setattr(runner.http_client, "single_request_sync", _fake_sync)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+
+    config = _config(api_base="http://localhost:8000/v1", max_num_completed_requests=4)
+    results, wall = asyncio.run(runner.run_benchmark(config))
+    assert len(results) == 4
+    assert all(r[cm.ERROR_CODE] is None for r in results)
+
+
+def test_run_benchmark_open_loop_http_backend(monkeypatch):
+    # T9：开环端到端配合假 HTTP 后端。
+    def _fake_sync(model, api_base, api_key_env, num_input_tokens, timeout, body):
+        return {
+            cm.TTFT: 0.01,
+            cm.E2E_LAT: 0.02,
+            cm.NUM_INPUT_TOKENS: num_input_tokens,
+            cm.NUM_OUTPUT_TOKENS: 2,
+            cm.ERROR_CODE: None,
+            cm.ERROR_MSG: "",
+        }
+
+    monkeypatch.setattr(runner.http_client, "single_request_sync", _fake_sync)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+    monkeypatch.setattr(runner.random, "expovariate", lambda rate: 0.0)
+
+    config = _config(
+        api_base="http://localhost:8000/v1",
+        request_rate=100.0,
+        max_num_completed_requests=4,
+    )
+    results, wall = asyncio.run(runner.run_benchmark(config))
+    assert len(results) == 4
+    assert all(cm.SCHED_DELAY in r for r in results)
+
+
+def test_run_benchmark_http_uses_dedicated_executor_sized_to_n(monkeypatch):
+    # T10：专属线程池尺寸对齐 num_concurrent_requests，峰值并发 == N，
+    # 不被 asyncio 默认 executor（容量 32）隐性封顶。
+    state = {"inflight": 0, "peak": 0}
+    lock = __import__("threading").Lock()
+
+    def _slow_sync(model, api_base, api_key_env, num_input_tokens, timeout, body):
+        with lock:
+            state["inflight"] += 1
+            state["peak"] = max(state["peak"], state["inflight"])
+        time.sleep(0.05)
+        with lock:
+            state["inflight"] -= 1
+        return {
+            cm.TTFT: 0.01,
+            cm.E2E_LAT: 0.05,
+            cm.NUM_INPUT_TOKENS: num_input_tokens,
+            cm.NUM_OUTPUT_TOKENS: 1,
+            cm.ERROR_CODE: None,
+            cm.ERROR_MSG: "",
+        }
+
+    monkeypatch.setattr(runner.http_client, "single_request_sync", _slow_sync)
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+
+    config = _config(
+        api_base="http://localhost:8000/v1",
+        num_concurrent_requests=6,
+        max_num_completed_requests=6,
+        timeout=30,
+    )
+    results, wall = asyncio.run(runner.run_benchmark(config))
+    assert len(results) == 6
+    assert state["peak"] == 6
+
+
+# ---- Warmup 请求（spec 2026-07-25 §6 T1-T6） ----
+
+
+def _make_counting_single_request(calls, warmup_sleep=0.0, warmup_n=0):
+    """替身 _single_request：记录每次调用入口时刻；前 warmup_n 次可选 sleep。"""
+
+    async def _fake(
+        config,
+        prompt_text,
+        num_input_tokens,
+        sampled_max_tokens,
+        request_timeout=None,
+        executor=None,
+    ):
+        idx = len(calls)
+        calls.append(time.monotonic())
+        if idx < warmup_n and warmup_sleep > 0:
+            await asyncio.sleep(warmup_sleep)
+        return {
+            cm.TTFT: 0.01,
+            cm.E2E_LAT: 0.02,
+            cm.NUM_INPUT_TOKENS: num_input_tokens,
+            cm.NUM_OUTPUT_TOKENS: 2,
+            cm.ERROR_CODE: None,
+            cm.ERROR_MSG: "",
+        }
+
+    return _fake
+
+
+def _patch_sampling(monkeypatch):
+    monkeypatch.setattr(runner, "sample_prompt", lambda *a, **k: ("p", 1))
+    monkeypatch.setattr(runner, "sample_output_len", lambda *a, **k: 10)
+
+
+def test_warmup_zero_equivalent_to_current(monkeypatch):
+    # T1：num_warmup_requests=0（默认）→ _single_request 恰调 max 次，results == max。
+    calls = []
+    monkeypatch.setattr(runner, "_single_request", _make_counting_single_request(calls))
+    _patch_sampling(monkeypatch)
+
+    results, _ = asyncio.run(
+        runner.run_benchmark(
+            _config(max_num_completed_requests=5, num_warmup_requests=0)
+        )
+    )
+    assert len(calls) == 5
+    assert len(results) == 5
+
+
+def test_warmup_requests_discarded(monkeypatch):
+    # T2：warmup=3, max=5 → _single_request 共 8 次；返回 results 恰 5 条（warmup 丢弃）。
+    calls = []
+    monkeypatch.setattr(runner, "_single_request", _make_counting_single_request(calls))
+    _patch_sampling(monkeypatch)
+
+    results, _ = asyncio.run(
+        runner.run_benchmark(
+            _config(max_num_completed_requests=5, num_warmup_requests=3)
+        )
+    )
+    assert len(calls) == 8  # 3 warmup + 5 measured
+    assert len(results) == 5  # warmup 结果不进 results
+
+
+def test_warmup_excluded_from_wall_clock(monkeypatch):
+    # T3：warmup 请求耗时、测量相极快 → 返回的 wall_clock_s 不含 warmup 耗时。
+    calls = []
+    monkeypatch.setattr(
+        runner,
+        "_single_request",
+        _make_counting_single_request(calls, warmup_sleep=0.1, warmup_n=2),
+    )
+    _patch_sampling(monkeypatch)
+
+    t0 = time.monotonic()
+    results, wall = asyncio.run(
+        runner.run_benchmark(
+            _config(
+                num_concurrent_requests=2,
+                max_num_completed_requests=3,
+                num_warmup_requests=2,
+            )
+        )
+    )
+    total = time.monotonic() - t0
+    assert len(results) == 3
+    assert total >= 0.1  # warmup 确实发生并耗时
+    assert wall < total - 0.05  # 返回的 wall 明显小于含 warmup 的总耗时
+
+
+def test_warmup_precedes_measurement(monkeypatch):
+    # T4：所有 warmup 请求（前 N 次）都早于测量相首个请求。
+    calls = []
+    monkeypatch.setattr(
+        runner,
+        "_single_request",
+        _make_counting_single_request(calls, warmup_sleep=0.05, warmup_n=3),
+    )
+    _patch_sampling(monkeypatch)
+
+    asyncio.run(
+        runner.run_benchmark(
+            _config(
+                num_concurrent_requests=3,
+                max_num_completed_requests=4,
+                num_warmup_requests=3,
+            )
+        )
+    )
+    assert len(calls) == 7
+    warmup_times = calls[:3]
+    measured_times = calls[3:]
+    assert max(warmup_times) < min(measured_times)
+
+
+def test_warmup_closed_loop_under_open_loop(monkeypatch):
+    # T5：request_rate 设置时 warmup 仍闭环发 N 条；_arrival_offsets 的 count == max（不含 N）。
+    calls = []
+    monkeypatch.setattr(runner, "_single_request", _make_counting_single_request(calls))
+    _patch_sampling(monkeypatch)
+    monkeypatch.setattr(runner.random, "expovariate", lambda rate: 0.0)
+
+    captured = {}
+    orig = runner._arrival_offsets
+
+    def _spy(rate, count, horizon):
+        captured["count"] = count
+        return orig(rate, count, horizon)
+
+    monkeypatch.setattr(runner, "_arrival_offsets", _spy)
+
+    results, _ = asyncio.run(
+        runner.run_benchmark(
+            _config(
+                request_rate=100.0,
+                max_num_completed_requests=4,
+                num_warmup_requests=2,
+            )
+        )
+    )
+    assert len(calls) == 6  # 2 warmup + 4 measured
+    assert len(results) == 4
+    assert captured["count"] == 4  # 泊松到达只排 max 个，warmup 不掺入
+    assert all(cm.SCHED_DELAY in r for r in results)
+
+
+def test_warmup_uses_http_backend_when_api_base_set(monkeypatch):
+    # T6：api_base 设置时 warmup 与测量都走 http_client.single_request_sync，
+    # acompletion 全程未被触及。
+    def _boom_acompletion(**body):
+        raise AssertionError("api_base 设置时不应调用 acompletion")
+
+    monkeypatch.setattr(runner, "acompletion", _boom_acompletion)
+
+    count = {"n": 0}
+
+    def _fake_sync(model, api_base, api_key_env, num_input_tokens, timeout, body):
+        count["n"] += 1
+        return {
+            cm.TTFT: 0.01,
+            cm.E2E_LAT: 0.02,
+            cm.NUM_INPUT_TOKENS: num_input_tokens,
+            cm.NUM_OUTPUT_TOKENS: 2,
+            cm.ERROR_CODE: None,
+            cm.ERROR_MSG: "",
+        }
+
+    monkeypatch.setattr(runner.http_client, "single_request_sync", _fake_sync)
+    _patch_sampling(monkeypatch)
+
+    config = _config(
+        api_base="http://localhost:8000/v1",
+        max_num_completed_requests=4,
+        num_warmup_requests=2,
+    )
+    results, _ = asyncio.run(runner.run_benchmark(config))
+    assert count["n"] == 6  # 2 warmup + 4 measured 都走 HTTP 后端
+    assert len(results) == 4

@@ -6,14 +6,17 @@
 """
 
 import asyncio
+import functools
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from litellm import acompletion, token_counter
 
 from llmperf import common_metrics as cm
+from llmperf.benchmark import http_client
 from llmperf.benchmark.prompts import sample_output_len, sample_prompt
 
 
@@ -48,16 +51,27 @@ class BenchmarkConfig:
     # None=闭环（默认）；>0 = 开环，每秒到达请求数（泊松过程），此时
     # num_concurrent_requests 语义变为最大在途请求数上限。
     request_rate: Optional[float] = None
+    # HTTP 直连模式（spec 2026-07-22）：None=走 litellm（默认）；设置后绕开
+    # litellm SDK，直连该 base URL 的 OpenAI 兼容 /chat/completions 端点。
+    api_base: Optional[str] = None
+    api_key_env: str = "OPENAI_API_KEY"
+    # 正式测量前先发 N 条 warmup 请求（指标整条丢弃、不计入测量相计时），
+    # 排除冷启动对分位数的污染（spec 2026-07-25）。0=不 warmup（默认，等价现状）。
+    num_warmup_requests: int = 0
 
 
-async def _single_request(
-    config: BenchmarkConfig,
-    prompt_text: str,
-    num_input_tokens: int,
-    sampled_max_tokens: int,
-    request_timeout: Optional[float] = None,
+def _build_body(
+    config: BenchmarkConfig, prompt_text: str, sampled_max_tokens: int
 ) -> Dict[str, Any]:
-    """发一条流式请求，采集 TTFT/E2E/output。骨架照搬 litellm_client.py:61-103。"""
+    """两条后端（litellm / HTTP 直连）共用的请求体构造。
+
+    不含 timeout —— litellm 路径把它作为 acompletion 关键字参数附加，
+    HTTP 路径把它传给 requests.post(timeout=...)，两者都不写进 JSON body。
+
+    非 dict 的 additional_sampling_params 会在这里让 update 抛 TypeError；
+    调用方须在自己的 try 块内调用本函数，让异常被统一转成失败记录而不
+    外逃（A2 契约，评审 finding #1）。
+    """
     messages = [
         {"role": "system", "content": ""},
         {"role": "user", "content": prompt_text},
@@ -67,9 +81,53 @@ async def _single_request(
         "messages": messages,
         "stream": True,
         "max_tokens": sampled_max_tokens,
-        # 单请求 HTTP 超时 = 剩余全局预算（worker 传入）；直接调用回退全局 timeout。
-        "timeout": config.timeout if request_timeout is None else request_timeout,
     }
+    body.update(config.additional_sampling_params or {})
+    return body
+
+
+def _failure_record(num_input_tokens: int, error_msg: str) -> Dict[str, Any]:
+    return {
+        cm.TTFT: 0.0,
+        cm.E2E_LAT: 0.0,
+        cm.NUM_INPUT_TOKENS: num_input_tokens,
+        cm.NUM_OUTPUT_TOKENS: 0,
+        cm.ERROR_CODE: "unknown",
+        cm.ERROR_MSG: error_msg,
+    }
+
+
+async def _single_request(
+    config: BenchmarkConfig,
+    prompt_text: str,
+    num_input_tokens: int,
+    sampled_max_tokens: int,
+    request_timeout: Optional[float] = None,
+    executor: Optional[ThreadPoolExecutor] = None,
+) -> Dict[str, Any]:
+    """发一条流式请求，采集 TTFT/E2E/output。
+
+    config.api_base 设置时转发给 http_client（线程池桥接，见 spec 2026-07-22
+    §3.1）；否则走 litellm.acompletion（骨架照搬 litellm_client.py:61-103）。
+    """
+    timeout = config.timeout if request_timeout is None else request_timeout
+
+    if config.api_base is not None:
+        try:
+            body = _build_body(config, prompt_text, sampled_max_tokens)
+        except Exception as e:
+            return _failure_record(num_input_tokens, str(e))
+        loop = asyncio.get_event_loop()
+        fn = functools.partial(
+            http_client.single_request_sync,
+            config.model,
+            config.api_base,
+            config.api_key_env,
+            num_input_tokens,
+            timeout,
+            body,
+        )
+        return await loop.run_in_executor(executor, fn)
 
     ttft = 0.0
     generated_text = ""
@@ -81,7 +139,8 @@ async def _single_request(
     try:
         # body 组装放进 try：非 dict 的 additional_sampling_params 会让 update 抛
         # TypeError，A2 要求它被就地转成失败记录而非逃逸崩池（评审 finding #1）。
-        body.update(config.additional_sampling_params or {})
+        body = _build_body(config, prompt_text, sampled_max_tokens)
+        body["timeout"] = timeout
         start = time.monotonic()
         response = await acompletion(**body)
         async for tok in response:
@@ -140,6 +199,7 @@ async def _dispatch_at(
     start: float,
     sem: asyncio.Semaphore,
     results: List[Dict[str, Any]],
+    executor: Optional[ThreadPoolExecutor] = None,
 ) -> None:
     """开环单发射：睡到计划到达时刻 → 抢在途名额 → 重查预算 → 发射。
 
@@ -156,20 +216,21 @@ async def _dispatch_at(
             return  # 预算已尽不再发射，该到达不产生任何记录。
         request_timeout = max(0.0, config.timeout - elapsed)
         m = await _single_request(
-            config, prompt_text, num_input_tokens, sampled_max_tokens, request_timeout
+            config,
+            prompt_text,
+            num_input_tokens,
+            sampled_max_tokens,
+            request_timeout,
+            executor,
         )
         m[cm.SCHED_DELAY] = max(0.0, now - (start + arrival_offset))
         results.append(m)
 
 
-async def run_benchmark(
-    config: BenchmarkConfig,
-) -> Tuple[List[Dict[str, Any]], float]:
-    """调度入口。request_rate=None 走闭环 worker-pool；>0 走开环泊松发射。"""
-    if config.request_rate is not None and config.request_rate <= 0:
-        raise ValueError("request_rate must be > 0 (or None for closed-loop)")
+async def _build_prompt_queue(config: BenchmarkConfig, count: int) -> asyncio.Queue:
+    """按当前采样分布预生成 count 条 prompt 放进队列。测量相与 warmup 相共用。"""
     queue: asyncio.Queue = asyncio.Queue()
-    for _ in range(config.max_num_completed_requests):
+    for _ in range(count):
         text, n_in = sample_prompt(
             config.model,
             config.mean_input_tokens,
@@ -180,34 +241,21 @@ async def run_benchmark(
             config.mean_output_tokens, config.stddev_output_tokens
         )
         await queue.put((text, n_in, max_tokens))
+    return queue
 
-    results: List[Dict[str, Any]] = []
-    started = 0
-    start = time.monotonic()
 
-    if config.request_rate is not None:
-        sem = asyncio.Semaphore(config.num_concurrent_requests)
-        offsets = _arrival_offsets(
-            config.request_rate,
-            config.max_num_completed_requests,
-            float(config.timeout),
-        )
-        tasks = []
-        for offset in offsets:
-            text, n_in, max_tokens = queue.get_nowait()
-            tasks.append(
-                asyncio.create_task(
-                    _dispatch_at(
-                        config, text, n_in, max_tokens, offset, start, sem, results
-                    )
-                )
-            )
-        if tasks:
-            await asyncio.gather(*tasks)
-        return results, time.monotonic() - start
+async def _closed_loop(
+    config: BenchmarkConfig,
+    queue: asyncio.Queue,
+    start: float,
+    results: List[Dict[str, Any]],
+    executor: Optional[ThreadPoolExecutor],
+) -> None:
+    """闭环 worker-pool：num_concurrent_requests 个 worker 常驻消费 queue，到
+    timeout 或队列空即停。测量相与 warmup 相复用同一套机制（DRY）。
+    """
 
     async def worker() -> None:
-        nonlocal started
         while True:
             elapsed = time.monotonic() - start
             if elapsed >= config.timeout:
@@ -216,11 +264,78 @@ async def run_benchmark(
                 text, n_in, max_tokens = queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            started += 1
             request_timeout = max(0.0, config.timeout - elapsed)
-            m = await _single_request(config, text, n_in, max_tokens, request_timeout)
+            m = await _single_request(
+                config, text, n_in, max_tokens, request_timeout, executor
+            )
             results.append(m)
 
     await asyncio.gather(*[worker() for _ in range(config.num_concurrent_requests)])
-    wall_clock_s = time.monotonic() - start
-    return results, wall_clock_s
+
+
+async def run_benchmark(
+    config: BenchmarkConfig,
+) -> Tuple[List[Dict[str, Any]], float]:
+    """调度入口。request_rate=None 走闭环 worker-pool；>0 走开环泊松发射。
+
+    num_warmup_requests>0 时，测量相之前先闭环发 N 条 warmup 请求，其指标整条
+    丢弃、且不进测量相计时（测量 start 在 warmup 之后才起点，见 spec 2026-07-25 §3）。
+    """
+    if config.request_rate is not None and config.request_rate <= 0:
+        raise ValueError("request_rate must be > 0 (or None for closed-loop)")
+
+    results: List[Dict[str, Any]] = []
+
+    # HTTP 直连模式用专属线程池，尺寸对齐 num_concurrent_requests；不依赖
+    # asyncio 默认 executor（容量固定 min(32, cpu+4)，高并发下会变成隐性
+    # 瓶颈，见 spec 2026-07-22 §3.2）。warmup 相与测量相共用此池。
+    http_executor: Optional[ThreadPoolExecutor] = None
+    if config.api_base is not None:
+        http_executor = ThreadPoolExecutor(max_workers=config.num_concurrent_requests)
+
+    try:
+        # warmup 相：一律闭环（即便测量走开环），结果丢弃、不进测量计时。自带一段
+        # 独立 timeout 预算（warmup_start 起点），测量相随后重置 start 拿满预算。
+        if config.num_warmup_requests > 0:
+            warmup_queue = await _build_prompt_queue(config, config.num_warmup_requests)
+            warmup_start = time.monotonic()
+            await _closed_loop(config, warmup_queue, warmup_start, [], http_executor)
+
+        queue = await _build_prompt_queue(config, config.max_num_completed_requests)
+        start = time.monotonic()
+
+        if config.request_rate is not None:
+            sem = asyncio.Semaphore(config.num_concurrent_requests)
+            offsets = _arrival_offsets(
+                config.request_rate,
+                config.max_num_completed_requests,
+                float(config.timeout),
+            )
+            tasks = []
+            for offset in offsets:
+                text, n_in, max_tokens = queue.get_nowait()
+                tasks.append(
+                    asyncio.create_task(
+                        _dispatch_at(
+                            config,
+                            text,
+                            n_in,
+                            max_tokens,
+                            offset,
+                            start,
+                            sem,
+                            results,
+                            http_executor,
+                        )
+                    )
+                )
+            if tasks:
+                await asyncio.gather(*tasks)
+            return results, time.monotonic() - start
+
+        await _closed_loop(config, queue, start, results, http_executor)
+        wall_clock_s = time.monotonic() - start
+        return results, wall_clock_s
+    finally:
+        if http_executor is not None:
+            http_executor.shutdown(wait=False)
