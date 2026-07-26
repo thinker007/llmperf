@@ -26,6 +26,7 @@ from tqdm import tqdm
 
 from transformers import LlamaTokenizerFast
 
+
 def get_token_throughput_latencies(
     model: str,
     mean_input_tokens: int,
@@ -64,7 +65,7 @@ def get_token_throughput_latencies(
         "hf-internal-testing/llama-tokenizer"
     )
     get_token_length = lambda text: len(tokenizer.encode(text))
-    
+
     if not additional_sampling_params:
         additional_sampling_params = {}
 
@@ -75,17 +76,19 @@ def get_token_throughput_latencies(
     num_output_tokens_list = []
     prompts = []
     for i in range(max_num_completed_requests):
-        num_output_tokens = (sample_random_positive_int(
+        num_output_tokens = sample_random_positive_int(
             mean_output_tokens, stddev_output_tokens
-        ))
+        )
         num_output_tokens_list.append(num_output_tokens)
 
-        prompts.append(randomly_sample_sonnet_lines_prompt(
-            prompt_tokens_mean=mean_input_tokens,
-            prompt_tokens_stddev=stddev_input_tokens,
-            expect_output_tokens=num_output_tokens,
-            tokenizer=tokenizer
-        ))
+        prompts.append(
+            randomly_sample_sonnet_lines_prompt(
+                prompt_tokens_mean=mean_input_tokens,
+                prompt_tokens_stddev=stddev_input_tokens,
+                expect_output_tokens=num_output_tokens,
+                tokenizer=tokenizer,
+            )
+        )
     start_time = time.monotonic()
     pbar = tqdm(total=max_num_completed_requests)
 
@@ -100,7 +103,9 @@ def get_token_throughput_latencies(
             and num_completed_requests < max_num_completed_requests
         ):
 
-            default_sampling_params = {"max_tokens": num_output_tokens_list[request_index] }
+            default_sampling_params = {
+                "max_tokens": num_output_tokens_list[request_index]
+            }
             default_sampling_params.update(additional_sampling_params)
             request_config = RequestConfig(
                 model=model,
@@ -118,11 +123,18 @@ def get_token_throughput_latencies(
                 with completed_requests_lock:
                     if num_completed_requests < max_num_completed_requests:
                         if num_output_tokens:
-                            request_metrics[common_metrics.INTER_TOKEN_LAT] /= request_metrics[common_metrics.NUM_OUTPUT_TOKENS]
+                            request_metrics[
+                                common_metrics.INTER_TOKEN_LAT
+                            ] /= request_metrics[common_metrics.NUM_OUTPUT_TOKENS]
                         else:
                             request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
-                        request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
-                        request_metrics[common_metrics.NUM_TOTAL_TOKENS] = request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
+                        request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = (
+                            num_output_tokens
+                        )
+                        request_metrics[common_metrics.NUM_TOTAL_TOKENS] = (
+                            request_metrics[common_metrics.NUM_INPUT_TOKENS]
+                            + num_output_tokens
+                        )
                         e2e_lat = request_metrics[common_metrics.E2E_LAT]
                         request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = (
                             num_output_tokens / e2e_lat if e2e_lat else 0
@@ -131,7 +143,9 @@ def get_token_throughput_latencies(
                         completed_requests.extend(all_metrics)
                         pbar.update(len(all_metrics))
                         num_completed_requests += len(all_metrics)
-                        request_index = (request_index + num_concurrent_requests) % max_num_completed_requests
+                        request_index = (
+                            request_index + num_concurrent_requests
+                        ) % max_num_completed_requests
 
     threads = []
     for i in range(num_concurrent_requests):
@@ -162,12 +176,14 @@ def get_token_throughput_latencies(
                 else:
                     request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
                 request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
-                request_metrics[common_metrics.NUM_TOTAL_TOKENS] = request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
+                request_metrics[common_metrics.NUM_TOTAL_TOKENS] = (
+                    request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
+                )
                 e2e_lat = request_metrics[common_metrics.E2E_LAT]
                 request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = (
                     num_output_tokens / e2e_lat if e2e_lat else 0
                 )
-                completed_requests.extend(request_metrics)
+                completed_requests.append(request_metrics)
 
     print(f"\Results for token benchmark for {model} queried with the {llm_api} api.\n")
     ret = metrics_summary(completed_requests, start_time, end_time)
@@ -183,7 +199,7 @@ def get_token_throughput_latencies(
     }
 
     metadata["results"] = ret
-        
+
     return metadata, completed_requests
 
 
@@ -222,14 +238,14 @@ def metrics_summary(
 
     df = pd.DataFrame(metrics)
     df_without_errored_req = df[df[common_metrics.ERROR_CODE].isna()]
-    
+
     for key in [
         common_metrics.INTER_TOKEN_LAT,
         common_metrics.TTFT,
         common_metrics.E2E_LAT,
         common_metrics.REQ_OUTPUT_THROUGHPUT,
         common_metrics.NUM_INPUT_TOKENS,
-        common_metrics.NUM_OUTPUT_TOKENS
+        common_metrics.NUM_OUTPUT_TOKENS,
     ]:
         print(key)
         ret[key] = {}
@@ -281,7 +297,7 @@ def metrics_summary(
 
     ret[common_metrics.NUM_COMPLETED_REQUESTS] = num_completed_requests
     ret[common_metrics.COMPLETED_REQUESTS_PER_MIN] = num_completed_requests_per_min
-    
+
     return ret
 
 
