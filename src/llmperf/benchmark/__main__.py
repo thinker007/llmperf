@@ -72,9 +72,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--request-rate", type=float, default=None)
     p.add_argument("--num-concurrent-requests", type=int, default=10)
     p.add_argument("--max-num-completed-requests", type=int, default=10)
-    # 正式测量前先发 N 条 warmup 请求（指标丢弃、不计入测量计时），排除冷启动
-    # 对分位数的污染（spec 2026-07-25）。0=不 warmup（默认，等价现状）。
-    p.add_argument("--num-warmup-requests", type=int, default=0)
     p.add_argument("--timeout", type=int, default=90)
     # 非法 JSON 或非对象由 argparse 直接友好报错退出（spec I4 + 评审 finding #1）。
     p.add_argument("--additional-sampling-params", type=parse_json_dict, default={})
@@ -108,8 +105,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         parser.error("--stddev-output-tokens must be >= 0")
     if args.request_rate is not None and args.request_rate <= 0:
         parser.error("--request-rate must be > 0")
-    if args.num_warmup_requests < 0:
-        parser.error("--num-warmup-requests must be >= 0")
 
     config = BenchmarkConfig(
         model=args.model,
@@ -124,7 +119,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         request_rate=args.request_rate,
         api_base=args.api_base,
         api_key_env=args.api_key_env,
-        num_warmup_requests=args.num_warmup_requests,
     )
 
     results, wall_clock_s = asyncio.run(run_benchmark(config))
@@ -133,8 +127,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     summary["num_concurrent_requests"] = args.num_concurrent_requests
     if args.request_rate is not None:
         summary["request_rate"] = args.request_rate
-    if args.num_warmup_requests > 0:
-        summary["num_warmup_requests"] = args.num_warmup_requests
     summary["backend"] = "http" if args.api_base is not None else "litellm"
     if args.api_base is not None:
         summary["api_base"] = args.api_base

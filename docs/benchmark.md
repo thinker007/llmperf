@@ -58,26 +58,6 @@ python -m llmperf.benchmark \
 - summary 新增 `backend` 键（`"http"` 或 `"litellm"`，始终写入）；设置了 `--api-base` 时额外写入 `api_base` 键回显。
 - 闭环、开环（`--request-rate`）两种调度模式都可以叠加 `--api-base` 使用，管线其余部分（指标聚合、CLI 参数、落盘）零改动。
 
-## Warmup 请求（`--num-warmup-requests`，2026-07-25 新增）
-
-压测头几条请求会被**冷启动效应**污染：服务端首次加载/换入模型权重、KV-cache 与编译缓存尚未预热、连接与 TLS 会话首次建立。这些一次性开销落在最早的请求上，会把 TTFT/E2E 的 p95/p99 和最大值整体抬高。`--num-warmup-requests N` 在正式测量前先发 N 条"热身"请求把被测端打到稳态，其指标**整条丢弃、不计入任何统计**。
-
-```bash
-python -m llmperf.benchmark \
-  --model gpt-4o \
-  --num-warmup-requests 10 \
-  --num-concurrent-requests 10 \
-  --max-num-completed-requests 100 \
-  --timeout 600
-```
-
-- `--num-warmup-requests` 必须 ≥ 0（默认 `0` = 不 warmup，行为与升级前逐字节一致）。
-- **指标丢弃**：warmup 请求的 TTFT/ITL/吞吐等一律不进 summary、不进 individual 记录，只用于预热。
-- **不计入测量计时**：测量窗口的 wall-clock 起点在 warmup **之后**，因此 warmup 耗时绝不进入 `mean_output_throughput_token_per_s` / `achieved_requests_per_s` 的分母；`--max-num-completed-requests` 仍表示"要正式测量的请求数"，与 warmup 数相互独立。
-- **一律闭环预热**：即便测量走开环（`--request-rate`）或 HTTP 直连（`--api-base`），warmup 阶段都用 worker-pool 闭环发射（并发度 = `--num-concurrent-requests`）、打同一个被测后端；开环的泊松到达调度只作用于测量相，不受 warmup 干扰。
-- **独立超时预算**：warmup 阶段以自己的起点、`--timeout` 为上限（防止某条 warmup 卡死拖垮整轮）；测量相随后**重置计时**，仍拿满完整的 `--timeout` 预算——即 `--timeout` 是"每一相的墙钟上限"，而非全程共享。
-- summary 仅在 `N>0` 时回显 `num_warmup_requests` 键；`N=0` 时输出结构完全不变。
-
 ## 与原 Ray 版（`token_benchmark_ray.py`）的差异
 
 - **并发引擎**：asyncio worker-pool 替代 Ray + threading，零重依赖。
@@ -90,5 +70,5 @@ python -m llmperf.benchmark \
 - **空响应计为失败**：请求成功返回但模型未吐出任何 token 时，该请求记 `error_code = "empty_response"`、计入错误率，而不是当成功污染延迟分位数。
 - **单请求错误隔离**：任何单个请求内部抛出的异常都会被就地转成一条带 `error_code`/`error_msg` 的失败记录，不会中断并发池里的其他请求。错误码取自异常的 `status_code`（保留合法的 `0`，仅在缺失时才记 `"unknown"`）。
 - **`--metadata` 校验与优先级**：格式必须是 `key=value`（逗号分隔多项）；某项缺 `=` 会直接报错退出（退出码 2）。用户 metadata 键若与内建汇总字段（`model` / `num_concurrent_requests` / `timestamp` / `litellm_version`）撞名，会被忽略并在 stderr 打印告警——内建字段永远优先。
-- **数值参数下限**：`--num-concurrent-requests` 与 `--max-num-completed-requests` 必须 ≥ 1，`--timeout` 必须 > 0，`--num-warmup-requests` 必须 ≥ 0；否则报错退出（退出码 2），不再静默跑出一份空报告。
+- **数值参数下限**：`--num-concurrent-requests` 与 `--max-num-completed-requests` 必须 ≥ 1，`--timeout` 必须 > 0；否则报错退出（退出码 2），不再静默跑出一份空报告。
 - **`--additional-sampling-params` 必须是 JSON 对象**：非法 JSON 或合法但非对象（如 `'[1,2]'`、`'5'`）都会报错退出（退出码 2），而不是把非法值透传到底层导致压测中途崩溃。
