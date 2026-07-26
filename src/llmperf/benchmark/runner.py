@@ -55,8 +55,8 @@ class BenchmarkConfig:
     # litellm SDK，直连该 base URL 的 OpenAI 兼容 /chat/completions 端点。
     api_base: Optional[str] = None
     api_key_env: str = "OPENAI_API_KEY"
-    # 正式测量前先发 N 条 warmup 请求（指标整条丢弃、不计入测量相计时），
-    # 排除冷启动对分位数的污染（spec 2026-07-25）。0=不 warmup（默认，等价现状）。
+    # Warmup（spec 2026-07-25）：>0 时，正式测量前先发这么多条请求并丢弃其指标，
+    # 把被测端打到稳态（模型换入/缓存预热/连接首建），避免冷启动污染分位数。
     num_warmup_requests: int = 0
 
 
@@ -227,8 +227,11 @@ async def _dispatch_at(
         results.append(m)
 
 
-async def _build_prompt_queue(config: BenchmarkConfig, count: int) -> asyncio.Queue:
-    """按当前采样分布预生成 count 条 prompt 放进队列。测量相与 warmup 相共用。"""
+async def _build_prompt_queue(config: BenchmarkConfig, count: int) -> "asyncio.Queue":
+    """预生成 count 条 (prompt_text, num_input_tokens, sampled_max_tokens) 放入队列。
+
+    供测量相与 warmup 相共用（各自独立建队，互不干扰）。
+    """
     queue: asyncio.Queue = asyncio.Queue()
     for _ in range(count):
         text, n_in = sample_prompt(
@@ -246,13 +249,16 @@ async def _build_prompt_queue(config: BenchmarkConfig, count: int) -> asyncio.Qu
 
 async def _closed_loop(
     config: BenchmarkConfig,
-    queue: asyncio.Queue,
+    queue: "asyncio.Queue",
     start: float,
     results: List[Dict[str, Any]],
-    executor: Optional[ThreadPoolExecutor],
+    executor: Optional[ThreadPoolExecutor] = None,
 ) -> None:
-    """闭环 worker-pool：num_concurrent_requests 个 worker 常驻消费 queue，到
-    timeout 或队列空即停。测量相与 warmup 相复用同一套机制（DRY）。
+    """闭环 worker-pool：num_concurrent_requests 个常驻协程消费队列，任一完成立刻
+    取下一个（不用 gather 批处理，避免 #59 式并发数塌陷，见 spec §4.2）。
+
+    到 config.timeout（相对 start）或队列空即停；不 cancel 在途请求（spec §4.3）。
+    复用于测量相闭环发射与 warmup 相（warmup 恒闭环，spec 2026-07-25 §3.2）。
     """
 
     async def worker() -> None:
@@ -276,10 +282,12 @@ async def _closed_loop(
 async def run_benchmark(
     config: BenchmarkConfig,
 ) -> Tuple[List[Dict[str, Any]], float]:
-    """调度入口。request_rate=None 走闭环 worker-pool；>0 走开环泊松发射。
+    """调度入口。
 
-    num_warmup_requests>0 时，测量相之前先闭环发 N 条 warmup 请求，其指标整条
-    丢弃、且不进测量相计时（测量 start 在 warmup 之后才起点，见 spec 2026-07-25 §3）。
+    先跑 warmup 相（config.num_warmup_requests>0 时，恒闭环发射、结果整条丢弃，
+    spec 2026-07-25 §3），把被测端打到稳态；再跑测量相：request_rate=None 走
+    闭环 worker-pool，>0 走开环泊松发射。测量 wall-clock 的计时起点在 warmup
+    之后，故 warmup 耗时不计入吞吐/达成速率的分母。
     """
     if config.request_rate is not None and config.request_rate <= 0:
         raise ValueError("request_rate must be > 0 (or None for closed-loop)")
@@ -288,21 +296,20 @@ async def run_benchmark(
 
     # HTTP 直连模式用专属线程池，尺寸对齐 num_concurrent_requests；不依赖
     # asyncio 默认 executor（容量固定 min(32, cpu+4)，高并发下会变成隐性
-    # 瓶颈，见 spec 2026-07-22 §3.2）。warmup 相与测量相共用此池。
+    # 瓶颈，见 spec 2026-07-22 §3.2）。warmup 相与测量相共用同一线程池。
     http_executor: Optional[ThreadPoolExecutor] = None
     if config.api_base is not None:
         http_executor = ThreadPoolExecutor(max_workers=config.num_concurrent_requests)
 
     try:
-        # warmup 相：一律闭环（即便测量走开环），结果丢弃、不进测量计时。自带一段
-        # 独立 timeout 预算（warmup_start 起点），测量相随后重置 start 拿满预算。
         if config.num_warmup_requests > 0:
             warmup_queue = await _build_prompt_queue(config, config.num_warmup_requests)
             warmup_start = time.monotonic()
             await _closed_loop(config, warmup_queue, warmup_start, [], http_executor)
 
-        queue = await _build_prompt_queue(config, config.max_num_completed_requests)
+        # 测量计时起点移到 warmup 之后：wall_clock_s 天然不含 warmup 耗时。
         start = time.monotonic()
+        queue = await _build_prompt_queue(config, config.max_num_completed_requests)
 
         if config.request_rate is not None:
             sem = asyncio.Semaphore(config.num_concurrent_requests)
