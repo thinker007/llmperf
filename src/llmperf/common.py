@@ -8,7 +8,6 @@ from llmperf.ray_clients.sagemaker_client import SageMakerClient
 from llmperf.ray_clients.vertexai_client import VertexAIClient
 from llmperf.ray_llm_client import LLMClient
 
-
 # Registry keeps SUPPORTED_APIS and the constructor branches in sync: the error
 # message can never again claim an API the code doesn't actually build.
 _CLIENT_REGISTRY = {

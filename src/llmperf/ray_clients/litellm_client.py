@@ -67,7 +67,9 @@ class LiteLLMClient(LLMClient):
             for tok in response:
                 if tok.choices[0].delta:
                     delta = tok.choices[0].delta
-                    if delta.get("content", None) or delta.get("reasoning_content", None):#补充推理 reasoning_content
+                    if delta.get("content", None) or delta.get(
+                        "reasoning_content", None
+                    ):  # 补充推理 reasoning_content
                         if ttft == 0:
                             ttft = time.monotonic() - start_time
                             time_to_next_token.append(ttft)

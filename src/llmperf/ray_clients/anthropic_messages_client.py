@@ -26,7 +26,7 @@ def parse_data_line(chunk: bytes) -> Optional[Dict[str, Any]]:
     stem = b"data: "
     if not chunk.startswith(stem):
         return None
-    payload = chunk[len(stem):]
+    payload = chunk[len(stem) :]
     return json.loads(payload)
 
 
