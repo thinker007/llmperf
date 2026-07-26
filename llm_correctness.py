@@ -129,8 +129,17 @@ def llm_correctness(
             )
     print()
 
-    error_rate = num_errored_requests / num_completed_requests
-    mismatch_rate = num_mismatched_requests / num_completed_requests
+    # Guard against zero completions (e.g. the test timed out before any
+    # request finished): a bare 0/0 here would crash the whole run. Matches
+    # upstream ray-project/llmperf open issue #87 (ZeroDivisionError).
+    error_rate = (
+        num_errored_requests / num_completed_requests if num_completed_requests else 0
+    )
+    mismatch_rate = (
+        num_mismatched_requests / num_completed_requests
+        if num_completed_requests
+        else 0
+    )
     num_non_errored_requests = num_completed_requests - num_errored_requests
     summary_metrics = {}
     summary_metrics[common_metrics.NUM_ERRORS] = num_errored_requests
