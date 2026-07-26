@@ -35,23 +35,30 @@ class LLMClient:
 **坑点**：`LLMClient` 是普通类而非 `abc.ABCMeta` 元类，`@abc.abstractmethod` 装饰器**不会**在实例化时强制报错——它只是一个约定/文档标记。子类若忘记实现 `llm_request` 不会在导入期或实例化期报错，只会在真正调用时抛 `NotImplementedError` 风格的错误（实际上因为没有 ABCMeta，甚至可以被静默跳过，取决于 Python 版本行为）。新增客户端时务必手动核对方法签名一致，不要依赖运行时强制检查。
 
 ### `common.py::construct_clients(llm_api, num_clients) -> List[LLMClient]`
-按 `llm_api` 字符串路由到具体客户端类并批量创建 Ray Actor：
+按 `llm_api` 字符串路由到具体客户端类并批量创建 Ray Actor。**已改为注册表驱动**（M4 修复，`_CLIENT_REGISTRY` 字典查表）：
 ```python
-SUPPORTED_APIS = ["openai", "anthropic", "litellm"]
+_CLIENT_REGISTRY = {
+    "openai": OpenAIChatCompletionsClient,
+    "anthropic": AnthropicMessagesClient,
+    "sagemaker": SageMakerClient,
+    "vertexai": VertexAIClient,
+    "litellm": LiteLLMClient,
+}
+SUPPORTED_APIS = list(_CLIENT_REGISTRY)          # 由注册表派生，不再手写
 
-if llm_api == "openai": OpenAIChatCompletionsClient
-elif llm_api == "anthropic": AnthropicMessagesClient
-elif llm_api == "sagemaker": SageMakerClient
-elif llm_api == "vertexai": VertexAIClient
-elif llm_api in SUPPORTED_APIS: LiteLLMClient   # 实际只有 "litellm" 会落到这支
-else: raise ValueError(...)
+def construct_clients(llm_api, num_clients):
+    try:
+        client_cls = _CLIENT_REGISTRY[llm_api]
+    except KeyError:
+        raise ValueError(f"llm_api must be one of ...: {SUPPORTED_APIS}")
+    return [client_cls.remote() for _ in range(num_clients)]
 ```
-**已知坑点**：`SUPPORTED_APIS` 常量只列了 3 个值，但 `construct_clients` 实际支持 5 种 `llm_api`（`sagemaker`、`vertexai` 未被收录）。这个常量同时被用作 CLI `--help` 文案（`token_benchmark_ray.py`/`llm_correctness.py` 里 `f"...{SUPPORTED_APIS}"`），因此**帮助文本会漏掉 sagemaker/vertexai 两个实际可用的选项**，容易误导用户。修改支持的 API 列表时，要同步检查这个常量与 `elif` 链是否一致。
+**设计要点（单一真相源）**：`SUPPORTED_APIS` 从注册表派生，从此不可能再与实际构造分支漂移——旧的 `if/elif` 版本曾把 `SUPPORTED_APIS` 手写成只含 3 项（漏 `sagemaker`/`vertexai`），导致 CLI `--help` 文案与报错信息漏列两个实际可用选项。新增厂商=注册表加一行，`SUPPORTED_APIS` 与报错自动跟上。守护测试见 `tests/test_common.py`（M4：注册表与 `SUPPORTED_APIS` 同源 + 未知 API 报 `ValueError`）。
 
 ### `requests_launcher.py::RequestsLauncher`
 封装 `ray.util.ActorPool`，提供：
 - `launch_requests(request_config)`：仅当池中有空闲 Actor 时才提交任务（`has_free()` 判断），否则本次调用是空操作——调用方需要自己重试。
-- `get_next_ready(block=False)`：`block=False` 时只捞取"已经就绪"的结果（可能为空列表）；`block=True` 时会用**忙等 `while not has_next(): pass`** 阻塞直到至少有一个结果就绪，然后一次性捞干所有就绪结果。
+- `get_next_ready(block=False)`：`block=False` 时只捞取"已经就绪"的结果（可能为空列表）；`block=True` 时**若池中无在途 future 则直接 `raise StopIteration` 快速失败**（M2 修复），否则捞干所有就绪结果。关键洞察：`ActorPool.has_next()` 报的是"有无在途 future"而非"有无就绪结果"，因此空池 + blocking 永远等不来结果——旧实现的 `while not has_next(): pass` 会热自旋到永远，现改为快速失败。守护测试见 `tests/test_requests_launcher.py`（空池 blocking 抛 `StopIteration` 而非自旋）。
 
 **坑点（对应 git log 中的 #59 修复）**：`launch_requests` 的"仅在有空闲 Actor 时提交"设计，与压测循环里"先 launch 再 get_next_ready，不 block"的组合方式，如果调用节奏不对，容易出现"并发数塌陷"——即所有 Actor 都在处理慢请求时，无法提交新任务，直到有一个恰好完成。`token_benchmark_ray.py` 目前通过多线程（每个线程一个独立的 `RequestsLauncher` + 单 Actor）来规避这个问题（见下）。`src/llmperf/benchmark/` 的设计文档中专门用 worker-pool 模型再次分析并修正了这类"批处理语义"缺陷。
 
@@ -60,8 +67,9 @@ else: raise ValueError(...)
 
 ### `utils.py`
 - `LLMPerfResults`：结果落盘的包装类，自动打时间戳、`flatten_dict()` 展平嵌套字典后转 JSON。
-- `randomly_sample_sonnet_lines_prompt(...)`：按目标 token 数（用固定的 `LlamaTokenizerFast` 计数）从 `sonnet.txt`（莎士比亚十四行诗语料）随机拼接出一段 prompt，通过截断最后一行来精确控制 token 数。**采用统一分词器**是为了让不同厂商 API 在"相同 prompt token 数"这个前提下公平对比——即便厂商各自的分词器不同。
-- `sample_random_positive_int(mean, stddev)`：从高斯分布重采样直到取到正数（因为高斯分布可能采出负数，而 token 数不能为负）。
+- `_get_default_tokenizer()`：**惰性加载并缓存**默认 `LlamaTokenizerFast`（H2 修复）。此前分词器作为函数默认参数在 import 期即加载，导致任何 `import llmperf.utils` 都触发下载、连累 `llm_correctness` 离线 import 失败；现改为首次真正需要时才加载。守护测试见 `tests/test_utils.py`（断言 `tokenizer` 默认参数为 `None`）。
+- `randomly_sample_sonnet_lines_prompt(...)`：按目标 token 数（默认惰性加载的 Llama 分词器计数，也可注入自定义 `tokenizer=`）从 `sonnet.txt`（莎士比亚十四行诗语料）随机拼接出一段 prompt，截断最后一行精确控制 token 数。**采用统一分词器**是为了让不同厂商 API 在"相同 prompt token 数"前提下公平对比。**`stddev==0` 收敛保护**：`gauss(mean, 0)` 是定值，若小于基底前缀长度，"重采样直到超过阈值"的 while 会死循环——代码对 `stddev==0` 做 `max(采样值, 基底长度)` clamp（与 `benchmark/prompts.py` 同款）。守护测试见 `tests/test_utils.py`。
+- `sample_random_positive_int(mean, stddev)`：从高斯分布重采样直到取到正数（token 数不能为负）。**`mean<=0` 快速失败抛 `ValueError`**（M2）：否则 `stddev==0` 必死循环、`stddev>0` 概率死循环。守护测试见 `tests/test_utils.py`（参数化）。
 - `flatten_dict`：递归展平嵌套字典，`a.b.c` 形式的 key。
 - `upload_to_s3`：调用 `aws s3 sync` CLI 命令（子进程），非 boto3 API 调用。
 
@@ -106,7 +114,15 @@ token_benchmark_ray.py
 
 ## 测试与质量
 
-`src/llmperf` 本体（`RequestConfig`/`RequestsLauncher`/`common.py` 路由逻辑/`utils.py` 采样与展平函数）目前**没有直接针对它的单元测试**——`tests/` 下现有的测试文件分别覆盖 `ray_clients/anthropic_messages_client.py` 和 `benchmark/` 子模块（`test_benchmark_{prompts,metrics,runner,cli}.py`，共 26 个用例，`benchmark/` 已完工，见其独立文档）。`common.py::construct_clients()` 的路由分支和 `utils.py::flatten_dict`/`sample_random_positive_int` 仍是本模块最大的测试缺口，建议优先补充纯函数单测（不需要 Ray runtime）。
+`src/llmperf` 本体的纯逻辑**已有直接单测**（不起 Ray runtime、不连网络）：
+
+| 测试文件 | 覆盖 | 要点 |
+|---|---|---|
+| `tests/test_common.py` | `common.py` 客户端注册表 | M4：`SUPPORTED_APIS` 与 `_CLIENT_REGISTRY` 同源、未知 `llm_api` 报 `ValueError`（走 `KeyError` 路径，无需实例化 actor） |
+| `tests/test_utils.py` | `utils.py` 纯函数 | H2 tokenizer 不在 import 期加载、注入 tokenizer 口径自洽、M2 `mean<=0` 快速失败、`stddev==0` clamp 不死循环 |
+| `tests/test_requests_launcher.py` | `requests_launcher.py` 取结果 | M2 空池 blocking 抛 `StopIteration` 而非热自旋、正常排空、非阻塞取结果（注入伪 `ActorPool`） |
+
+全仓测试现为 **9 文件 / 90 函数 / pytest 104 例**（详见 `tests/CLAUDE.md`）。仍未覆盖的小缺口：`utils.py::flatten_dict`/`LLMPerfResults` 落盘、`common.py` 有效分支真正 `.remote()` 构造（需 Ray，成本高、价值低）。
 
 ## 常见问题 (FAQ)
 
