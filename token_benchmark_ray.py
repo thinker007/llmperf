@@ -27,6 +27,33 @@ from tqdm import tqdm
 from transformers import LlamaTokenizerFast
 
 
+def finalize_request_metrics(
+    request_metrics: Dict[str, Any], gen_text: str, get_token_length
+) -> Dict[str, Any]:
+    """Recompute the output-token-dependent fields of a single request's metrics.
+
+    Both the main completion loop and the end-of-run cleanup sweep turn a
+    client-reported ``request_metrics`` dict plus the raw generated text into the
+    same final shape (recounted output tokens, inter-token latency, total tokens,
+    throughput). Sharing this implementation keeps the two call sites from ever
+    dividing inter-token latency by a different token count.
+    """
+    num_output_tokens = get_token_length(gen_text)
+    if num_output_tokens:
+        request_metrics[common_metrics.INTER_TOKEN_LAT] /= num_output_tokens
+    else:
+        request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
+    request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
+    request_metrics[common_metrics.NUM_TOTAL_TOKENS] = (
+        request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
+    )
+    e2e_lat = request_metrics[common_metrics.E2E_LAT]
+    request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = (
+        num_output_tokens / e2e_lat if e2e_lat else 0
+    )
+    return request_metrics
+
+
 def get_token_throughput_latencies(
     model: str,
     mean_input_tokens: int,
@@ -119,25 +146,10 @@ def get_token_throughput_latencies(
             all_metrics = []
             for out in outs:
                 request_metrics, gen_text, _ = out
-                num_output_tokens = get_token_length(gen_text)
                 with completed_requests_lock:
                     if num_completed_requests < max_num_completed_requests:
-                        if num_output_tokens:
-                            request_metrics[
-                                common_metrics.INTER_TOKEN_LAT
-                            ] /= request_metrics[common_metrics.NUM_OUTPUT_TOKENS]
-                        else:
-                            request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
-                        request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = (
-                            num_output_tokens
-                        )
-                        request_metrics[common_metrics.NUM_TOTAL_TOKENS] = (
-                            request_metrics[common_metrics.NUM_INPUT_TOKENS]
-                            + num_output_tokens
-                        )
-                        e2e_lat = request_metrics[common_metrics.E2E_LAT]
-                        request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = (
-                            num_output_tokens / e2e_lat if e2e_lat else 0
+                        finalize_request_metrics(
+                            request_metrics, gen_text, get_token_length
                         )
                         all_metrics.append(request_metrics)
                         completed_requests.extend(all_metrics)
@@ -165,24 +177,11 @@ def get_token_throughput_latencies(
     clients = construct_clients(llm_api=llm_api, num_clients=1)
     req_launcher = RequestsLauncher(clients)
     outs = req_launcher.get_next_ready()
-    all_metrics = []
     for out in outs:
         request_metrics, gen_text, _ = out
-        num_output_tokens = get_token_length(gen_text)
         with completed_requests_lock:
             if num_completed_requests < max_num_completed_requests:
-                if num_output_tokens:
-                    request_metrics[common_metrics.INTER_TOKEN_LAT] /= num_output_tokens
-                else:
-                    request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
-                request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
-                request_metrics[common_metrics.NUM_TOTAL_TOKENS] = (
-                    request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
-                )
-                e2e_lat = request_metrics[common_metrics.E2E_LAT]
-                request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = (
-                    num_output_tokens / e2e_lat if e2e_lat else 0
-                )
+                finalize_request_metrics(request_metrics, gen_text, get_token_length)
                 completed_requests.append(request_metrics)
 
     print(f"\Results for token benchmark for {model} queried with the {llm_api} api.\n")
