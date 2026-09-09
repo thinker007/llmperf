@@ -166,6 +166,16 @@ def test_main_loop_itl_uses_recomputed_token_count_not_stale_client_count(monkey
     assert individual[0][cm.INTER_TOKEN_LAT] == pytest.approx(2.2 / 11)
 
 
+def test_results_banner_has_no_invalid_escape_sequence(monkeypatch, capsys):
+    # 发现 E：`print(f"\Results ...")` 里的 `\R` 不是合法转义序列，Python 只是
+    # 告警并按字面量打印出 "\Results"（含反斜杠），本意显然是换行 "\nResults"。
+    _run_single_request(monkeypatch, test_timeout_s=10)
+
+    captured = capsys.readouterr().out
+    assert "\\Results" not in captured
+    assert "\nResults for token benchmark" in captured
+
+
 def test_main_loop_and_cleanup_paths_produce_identical_itl(monkeypatch):
     # 同一份带陈旧 NUM_OUTPUT_TOKENS 的输入，分别走主循环路径（timeout>0）与
     # 收尾捞取路径（timeout=0），两路算出的 ITL 必须完全一致。

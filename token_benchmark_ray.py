@@ -184,7 +184,9 @@ def get_token_throughput_latencies(
                 finalize_request_metrics(request_metrics, gen_text, get_token_length)
                 completed_requests.append(request_metrics)
 
-    print(f"\Results for token benchmark for {model} queried with the {llm_api} api.\n")
+    print(
+        f"\nResults for token benchmark for {model} queried with the {llm_api} api.\n"
+    )
     ret = metrics_summary(completed_requests, start_time, end_time)
 
     metadata = {
