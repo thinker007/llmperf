@@ -28,7 +28,7 @@ def llm_correctness(
     num_concurrent_requests: int = 1,
     max_num_completed_requests: int = 500,
     test_timeout_s=90,
-    llm_api="chat",
+    llm_api="openai",
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Get the token throughput and latencies for the given model.
 
@@ -39,7 +39,7 @@ def llm_correctness(
         num_concurrent_requests: The number of concurrent requests to make. Increase
             this to increase the amount of load and vice versa.
         test_timeout_s: The amount of time to run the test for before reporting results.
-        llm_api: The type of request to make. Either "chat" or "litellm".
+        llm_api: The type of request to make. One of SUPPORTED_APIS.
 
     Returns:
         A tuple containing summary metrics and raw results from the test.
@@ -170,7 +170,7 @@ def run(
 ):
     """
     Args:
-        llm_api: The type of request to make. Either "chat" or "litellm".
+        llm_api: The type of request to make. One of SUPPORTED_APIS.
         model: The name of the model to query.
         max_num_completed_requests: The number of requests to complete before finishing the test.
         test_timeout_s: The amount of time to run the test for before reporting results.
