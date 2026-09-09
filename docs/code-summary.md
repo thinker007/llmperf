@@ -126,7 +126,7 @@ argparse → 组装 `BenchmarkConfig` → `asyncio.run(run_benchmark)` → `summ
 | 空流 | 不特判 | 判 `empty_response` 错误 |
 | prompt 随机性 | `random.seed(11111)` **可复现** | 未播种，逐次不同 |
 
-改任何"指标口径"前，先确认改的是哪条路线。**Ray 侧 ITL 不是"间隔之和"本身**：客户端 `openai_chat_completions_client.py:135` 存的是间隔求和（注释直言"约等于 E2E"），真正的逐字延迟是在入口 `token_benchmark_ray.py:121` 再除以输出 token 数得到的——这条除法是口径的关键一步，且两条代码路径的**除数并不一致**（见 §10 发现 A）。
+改任何"指标口径"前，先确认改的是哪条路线。**Ray 侧 ITL 不是"间隔之和"本身**：客户端 `openai_chat_completions_client.py:135` 存的是间隔求和（注释直言"约等于 E2E"），真正的逐字延迟是在入口 `token_benchmark_ray.py` 再除以输出 token 数得到的——这条除法是口径的关键一步。**两条代码路径（主循环/收尾）曾经除数不一致（发现 A），已于 2026-09-10 修复**：两处都改调同一个 `finalize_request_metrics()`，不会再出现同一批请求走两条路得到不同 ITL 的情况，详见 §11。
 
 ---
 
@@ -135,7 +135,7 @@ argparse → 组装 `BenchmarkConfig` → `asyncio.run(run_benchmark)` → `summ
 - 框架 `pytest`；**全部是纯函数级单测**——不连真实网络、不起 Ray，用 `monkeypatch` 替换外部依赖（如 `litellm.token_counter`）。
 - 覆盖重心=最易出 bug 又难对 Actor 直接测的部分：SSE 分帧、prompt 采样、指标聚合。**把易错逻辑抽成纯函数**是全仓贯穿的可测性设计。
 - 未装 `pytest-asyncio`：异步测试约定在普通同步 `def test_...()` 里用 `asyncio.run()` 驱动（零新增依赖）。
-- 现状（2026-07-26 实测）：全仓 **99 个测试函数 / pytest 113 例全绿**（`tests/` 下 11 个测试文件，其中 `test_benchmark_runner.py` 37 个、`test_benchmark_metrics.py` 16 个、`test_benchmark_cli.py` 12 个、`test_benchmark_http_client.py` 10 个、`test_anthropic_messages_client.py` 7 个、`test_benchmark_prompts.py` 5 个、`test_utils.py` 4 个、`test_requests_launcher.py` 3 个、`test_llm_correctness.py` 2 个、`test_common.py` 2 个、`test_token_benchmark_ray.py` 1 个）。其中 `test_llm_correctness.py` 是此前为**发现 C（除零）**新增的复现+守护测试；`test_benchmark_cli.py` 比历史峰值少 2 个函数，系工作区撤销了 warmup 的 CLI 级测试（见文首 ⚠️ 提示）。
+- 现状（2026-09-10 实测）：全仓 **104 个测试函数 / pytest 118 例全绿**（`tests/` 下 11 个测试文件，其中 `test_benchmark_runner.py` 37 个、`test_benchmark_metrics.py` 16 个、`test_benchmark_cli.py` 12 个、`test_benchmark_http_client.py` 10 个、`test_anthropic_messages_client.py` 7 个、`test_benchmark_prompts.py` 5 个、`test_utils.py` 4 个、`test_llm_correctness.py` 4 个、`test_token_benchmark_ray.py` 4 个、`test_requests_launcher.py` 3 个、`test_common.py` 2 个）。`test_llm_correctness.py` 覆盖**发现 C（除零）**与**发现 D（陈旧默认值）**；`test_token_benchmark_ray.py` 覆盖**发现 B（收尾污染）**、**发现 A（ITL 除数分叉）**与**发现 E（无效转义）**；`test_benchmark_cli.py` 比历史峰值少 2 个函数，系工作区撤销了 warmup 的 CLI 级测试（见文首 ⚠️ 提示）。
 
 ---
 
@@ -161,13 +161,13 @@ argparse → 组装 `BenchmarkConfig` → `asyncio.run(run_benchmark)` → `summ
 
 ## 10. 深度调研：Ray 路线内幕与潜伏问题（2026-07-24 逐行审计）
 
-> 前 9 节把 benchmark 新路线讲透了，但 CLAUDE.md 里"唯一可用可跑通"的 **Ray 老路线**（`token_benchmark_ray.py` 497 行 / `llm_correctness.py` 309 行）此前几乎没被展开。本节是对这两个入口逐行审计后的发现——含 **5 处真实潜伏问题**（多在少走的分支里，平时跑不炸，但一旦触发就出错），以及几处容易误读的机制。**这些只是审计记录，尚未修复**；按仓库 TDD 约定，修复应先写复现测试再动手。
+> 前 9 节把 benchmark 新路线讲透了，但 CLAUDE.md 里"唯一可用可跑通"的 **Ray 老路线**（`token_benchmark_ray.py` / `llm_correctness.py`）此前几乎没被展开。本节是对这两个入口逐行审计后的发现——记录了 **5 处潜伏问题（A-E）**（多在少走的分支里，平时跑不炸，但一旦触发就出错），以及几处容易误读的机制。**截至 2026-09-10，A-E 五处均已按 TDD（先写复现测试再修）修复并全仓验绿**，本节保留作为审计过程记录，落地状态见 §11。
 
 ### 10.1 Ray 主循环怎么跑（`token_benchmark_ray.py`）
 
 - **prompt 预生成**：`get_token_throughput_latencies` 先 `random.seed(11111)`，在发压前把 `max_num_completed_requests` 条 prompt 全部采样好放进 `prompts[]`（"发压循环外造数据，循环内只发请求"），保证压测热路径最短、且**跨次运行 prompt 完全可复现**。
 - **并发=裸线程**：起 `num_concurrent_requests` 个 `threading.Thread`，每个线程 `construct_clients(num_clients=1)` 各建**独立的单 Actor 池**；线程按 `thread_index % max` 错位取 prompt、每完成一条 `+= num_concurrent_requests` 跳步，用**条带化下标**避免多线程抢同一条 prompt。共享计数 `num_completed_requests` 与结果列表用一把 `threading.Lock` 保护。
-- **两段收尾**：主循环靠 `time - start < timeout AND 完成数 < 上限` 双条件退出；退出后还有一段"最后再排空一次 `get_next_ready()`"的收尾代码，捞在途残余结果。**发现 A、B 都藏在这段收尾里**。
+- **两段收尾**：主循环靠 `time - start < timeout AND 完成数 < 上限` 双条件退出；退出后还有一段"最后再排空一次 `get_next_ready()`"的收尾代码，捞在途残余结果。**发现 A、B 都藏在这段收尾里**（均已修复，见 §11）。
 
 ### 10.2 逐字延迟（ITL）的真实算法链
 
@@ -204,12 +204,12 @@ argparse → 组装 `BenchmarkConfig` → `asyncio.run(run_benchmark)` → `summ
 
 按严重度排序，均建议遵循"先写复现测试 → 再修 → 跑绿"的 TDD 流程：
 
-1. ~~**发现 B（高）**：`token_benchmark_ray.py:170` 改为 `append`；补"收尾段有残余结果"的复现测试。~~ ✅ **已完成（2026-07-24）**：`extend(request_metrics)` → `append(request_metrics)`，复现测试 `tests/test_token_benchmark_ray.py::test_cleanup_residual_kept_as_dict_not_polluted`（`test_timeout_s=0` 命中收尾路径，注入假分词器/发射器，不起 Ray），全仓 105 例全绿。
-2. ~~**发现 C（中）**：`llm_correctness.py:132` 用 `_safe_div` 式零保护（完成数为 0 时 `error_rate` 记 0 或 None）；复现测试模拟"超时零完成"。~~ ✅ **已完成（2026-07-25）**：`error_rate`/`mismatch_rate` 加 `if num_completed_requests else 0` 守卫（沿用仓库既有 `... if <denom> else 0` 惯用法），复现测试 `tests/test_llm_correctness.py`（2 例：不崩 + 两率为 0），Red→Green→black，全仓 116 例全绿。此即上游 open issue #87 同族缺陷（§12.3）。
-3. **发现 A（中）**：统一 ITL 两处除数（都用最终采用的 token 计数口径），消除正常/收尾路径的数值分叉。
-4. **发现 D、E（低）**：把 `llm_correctness.llm_correctness` 默认值改成 `"openai"`、同步 docstring；修正 `\Results` 转义为 `\nResults` 或原意的换行。
+1. ~~**发现 B（高）**：`token_benchmark_ray.py:170` 改为 `append`；补"收尾段有残余结果"的复现测试。~~ ✅ **已完成（2026-07-24）**：`extend(request_metrics)` → `append(request_metrics)`，复现测试 `tests/test_token_benchmark_ray.py::test_cleanup_residual_kept_as_dict_not_polluted`（`test_timeout_s=0` 命中收尾路径，注入假分词器/发射器，不起 Ray）。
+2. ~~**发现 C（中）**：`llm_correctness.py:132` 用 `_safe_div` 式零保护（完成数为 0 时 `error_rate` 记 0 或 None）；复现测试模拟"超时零完成"。~~ ✅ **已完成（2026-07-25）**：`error_rate`/`mismatch_rate` 加 `if num_completed_requests else 0` 守卫（沿用仓库既有 `... if <denom> else 0` 惯用法），复现测试 `tests/test_llm_correctness.py`（2 例：不崩 + 两率为 0）。此即上游 open issue #87 同族缺陷（§12.3）。
+3. ~~**发现 A（中）**：统一 ITL 两处除数（都用最终采用的 token 计数口径），消除正常/收尾路径的数值分叉。~~ ✅ **已完成（2026-09-10）**：抽取 `finalize_request_metrics(request_metrics, gen_text, get_token_length)`，主循环与收尾段改为共同调用它，两处不再各写一份、除数自然统一。复现测试 `tests/test_token_benchmark_ray.py::test_main_loop_itl_uses_recomputed_token_count_not_stale_client_count` 与 `::test_main_loop_and_cleanup_paths_produce_identical_itl`（构造客户端回传陈旧 token 数 5、假分词器重算为 11，断言 ITL 用 11 做除数、两条路径结果一致）。
+4. ~~**发现 D、E（低）**：把 `llm_correctness.llm_correctness` 默认值改成 `"openai"`、同步 docstring；修正 `\Results` 转义为 `\nResults` 或原意的换行。~~ ✅ **已完成（2026-09-10）**：D——`llm_api` 默认值 `"chat"` → `"openai"`，docstring 改指向 `SUPPORTED_APIS`，复现测试断言"默认值 ∈ 注册表"这一契约本身（不硬编码具体值）；E——`print(f"\Results ...")` 的非法转义 `\R` 改为 `\n`，复现测试用 `capsys` 断言 stdout 不含字面 `\Results` 且含真实换行。
 
-> 发现 **B、C 已落地修复**（均按 TDD：先复现测试再修，全仓 116 例全绿）；剩余 **A（ITL 除数分叉）、D（陈旧默认值）、E（无效转义）** 未改动，供后续迭代。是否落地取决于项目所有者对"老 Ray 路线维护优先级"的判断——若 Ray 路线正逐步让位于 benchmark 新路线，A/D/E 可低优先。
+> **审计发现 A-E 五处已全部落地修复**（均按 TDD：先写复现测试确认 Red，再实现，`black` 格式化后确认 Green，逐条独立提交）。全仓测试从 99 函数/113 例增至 **104 函数/118 例**，全绿。
 
 ---
 
@@ -232,7 +232,7 @@ argparse → 组装 `BenchmarkConfig` → `asyncio.run(run_benchmark)` → `summ
 
 | 上游 issue | 状态 | 与本 fork 的关系 |
 |---|---|---|
-| **#87** *ZeroDivisionError: division by zero* | OPEN | traceback 落在 `token_benchmark_ray.py` 的 `REQ_OUTPUT_THROUGHPUT = num_output_tokens / <生成耗时>`（上游裸除）。**本 fork 已修复此处**：主循环 `:127-128` 与收尾 `:167-168` 均改为 `num_output_tokens / e2e_lat if e2e_lat else 0`，客户端层 `output_throughput` 也初始化为 0 兜底。→ **一个上游未决 bug，在本 fork 已经不存在。** 但注意：本仓库审计**发现 C**（`llm_correctness.py:132` 的 `error_rate` 除零）是**另一处**除零，#87 并不覆盖它，仍是真实待修项。 |
+| **#87** *ZeroDivisionError: division by zero* | OPEN | traceback 落在 `token_benchmark_ray.py` 的 `REQ_OUTPUT_THROUGHPUT = num_output_tokens / <生成耗时>`（上游裸除）。**本 fork 已修复此处**：主循环与收尾段现共同调用 `finalize_request_metrics()`，其中 `num_output_tokens / e2e_lat if e2e_lat else 0`，客户端层 `output_throughput` 也初始化为 0 兜底。→ **一个上游未决 bug，在本 fork 已经不存在。** 本仓库审计**发现 C**（`llm_correctness.py:132` 的 `error_rate` 除零）是**另一处**除零，#87 并不覆盖它，但**发现 C 也已在 2026-07-25 修复**，两处除零在本 fork 均已不复存在。 |
 | **#89** *如何压测推理模型 / reason content 是否计入 output token* | OPEN | 本 fork 的 `anthropic_messages_client.py` 已在 `extract_delta_text` 中同时识别 `thinking_delta`，**让首个 thinking token 计入 TTFT**、推理内容计入产出——正是该社区问题在本 fork 中的一种落地答案。 |
 | **#92** *支持 `--tokenizer-path` 自定义分词器* / **#75** *生成 prompt 长度不对* | OPEN | 呼应本文 §6 的"token 计数口径差异"：benchmark 路线用随模型变化的 `litellm.token_counter`，Ray 路线用固定 Llama 分词器。两种口径各有取舍，上游的分词器诉求在 benchmark 路线里已被"按目标模型计数"部分满足。 |
 | #90 llama4 / #91 embedding / #88 多模态 correctness / #95 指标区间偏差 | OPEN | 纯功能诉求，本 fork 暂未覆盖；记录在此供后续路线图参考——它们代表"归档上游无人认领、但真实存在"的需求缺口。 |
@@ -241,7 +241,7 @@ argparse → 组装 `BenchmarkConfig` → `asyncio.run(run_benchmark)` → `summ
 
 1. **本 fork 的定位应从"fork"升级为"事实上的续维护分支"**：上游已死，本地增量（asyncio 路线 + 原生 Anthropic + 一系列硬化/审计）已是项目主要价值来源。文档、README 的自我指向宜逐步与上游脱钩。
 2. **本 fork 已无意中修好了一个上游热门 open bug（#87 的吞吐除零）**——这佐证了本仓库"防御式边界（除零返 0/None）"工程习惯的实战价值。
-3. **审计发现 C 与上游 #87 是"同族不同处"的两处除零**：#87 那处已修，C 那处（correctness 的 error_rate）仍裸露，且社区里就有人踩过同类崩溃——这把发现 C 的优先级从"内部审计项"抬高为"社区验证过的真实痛点"，**建议优先修复**。
+3. **审计发现 C 与上游 #87 是"同族不同处"的两处除零**：#87 那处与 C 那处（correctness 的 error_rate）均已在本 fork 修复（2026-07-25）——社区里就有人踩过同类崩溃，这曾把发现 C 的优先级从"内部审计项"抬高为"社区验证过的真实痛点"，现已落地。
 4. 上游 37 个未决 issue 里，推理模型（#89）、自定义分词器（#92）等已被本 fork 的设计部分回应，可作为对外说明本 fork 相对上游优势的素材。
 
 ### 12.5 归档后社区仍在发声：两条值得关注的最新信号（`gh` 实查，2026-07-26）

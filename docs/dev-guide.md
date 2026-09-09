@@ -165,14 +165,16 @@ python -m pytest tests/ -v
 
 ---
 
-## 8. 已知待办（审计发现，尚未修）
+## 8. 已知待办（审计发现，已全部修复）
 
-`docs/code-summary.md` §10–11 记了 Ray 老路线逐行审计的潜伏问题，其中两个建议优先修（走 TDD）：
+`docs/code-summary.md` §10–11 记了 Ray 老路线逐行审计的 5 处潜伏问题（发现 A-E），**均已按 TDD（先写复现测试再修）修复并入仓**，可作为"如何给这个仓库提 TDD 修复 PR"的参考范例：
 
-- **`llm_correctness.py:132`**：`error_rate = num_errored / num_completed_requests` 无零保护，超时且零完成时 `ZeroDivisionError`。
-- Ray 路线 ITL 除数在主循环与收尾段口径不一致（`token_benchmark_ray.py` 正常/收尾两路除数不同）。
+- ~~**`llm_correctness.py:132`**：`error_rate = num_errored / num_completed_requests` 无零保护，超时且零完成时 `ZeroDivisionError`。~~ 已修（发现 C，加零保护守卫）。
+- ~~Ray 路线 ITL 除数在主循环与收尾段口径不一致（`token_benchmark_ray.py` 正常/收尾两路除数不同）。~~ 已修（发现 A，抽取共享的 `finalize_request_metrics()`）。
+- ~~`llm_correctness()` 默认 `llm_api="chat"` 不在客户端注册表里。~~ 已修（发现 D，默认值改 `"openai"`）。
+- ~~结果横幅 `print(f"\Results ...")` 含非法转义 `\R`。~~ 已修（发现 E，改为 `\n`）。
 
-想练手的好起点——每个都能先写一个复现测试。
+新的练手起点：查 `docs/code-summary.md` §12 的上游 open issue 交叉比对表，挑一条本 fork 尚未覆盖的功能诉求（如 #92 自定义分词器路径）动手实现。
 
 ---
 

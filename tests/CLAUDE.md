@@ -10,7 +10,7 @@
 python -m pytest tests/ -v
 ```
 
-当前全绿：**11 个文件 / 99 个测试函数 / pytest 展开 113 例**（2026-07-26 实测核对）。
+当前全绿：**11 个文件 / 104 个测试函数 / pytest 展开 118 例**（2026-09-10 实测核对）。
 
 ## 文件清单
 
@@ -25,8 +25,8 @@ python -m pytest tests/ -v
 | `test_utils.py` | `src/llmperf/utils.py` | 4 | **H2 tokenizer 不在 import 期加载**（默认参数为 None）、注入 tokenizer 时口径自洽、**M2 死循环快速失败（参数化 + stddev=0 钳制）** |
 | `test_common.py` | `src/llmperf/common.py` 客户端注册表 | 2 | **M4：`SUPPORTED_APIS` 与实际注册表同源**、未知 `llm_api` 报错 |
 | `test_requests_launcher.py` | `src/llmperf/requests_launcher.py` 阻塞取结果 | 3 | **M2：空池阻塞快速失败（`StopIteration`）而非热自旋**、正常排空、非阻塞取结果 |
-| `test_llm_correctness.py` | `llm_correctness.py` 除零防护 | 2 | 超时零完成场景不崩溃、`error_rate`/`mismatch_rate` 归 0（对应上游 open issue #87 同族缺陷） |
-| `test_token_benchmark_ray.py` | `token_benchmark_ray.py` 收尾段结果污染 | 1 | 收尾段 `dict` 结果用 `append` 而非 `extend`，不被污染成键字符串列表 |
+| `test_llm_correctness.py` | `llm_correctness.py` 除零防护 + 默认参数契约 | 4 | 超时零完成场景不崩溃、`error_rate`/`mismatch_rate` 归 0（对应上游 open issue #87 同族缺陷）；**默认 `llm_api` ∈ `SUPPORTED_APIS`（发现 D）**、docstring 不再提未注册的 `"chat"` |
+| `test_token_benchmark_ray.py` | `token_benchmark_ray.py` 收尾段结果污染 + ITL 除数一致性 + 横幅转义 | 4 | 收尾段 `dict` 结果用 `append` 而非 `extend`，不被污染成键字符串列表；**主循环 ITL 用重算 token 数而非陈旧客户端计数（发现 A）**、主循环与收尾段 ITL 数值一致；**结果横幅不再含非法转义 `\R`（发现 E）** |
 
 > ⚠️ **warmup CLI 接线当前处于未提交的回退状态**：`test_benchmark_runner.py` 里的 warmup 相测试（库层 `BenchmarkConfig.num_warmup_requests`）仍在且全绿，但 `test_benchmark_cli.py` 中原有的 `--num-warmup-requests` CLI 级用例已被工作区撤销——即 warmup 功能目前只能通过直接构造 `BenchmarkConfig` 使用，不接 CLI。详见根 `docs/code-summary.md` 文首提示。
 
@@ -43,6 +43,7 @@ python -m pytest tests/ -v
 
 ## 变更记录 (Changelog)
 
+- 2026-09-10（审计发现 A/D/E 重做，逐条 TDD）：三处独立提交，每处 Red→实现→black→Green。**发现 A**：`token_benchmark_ray.py` 主循环用客户端回传的陈旧 `NUM_OUTPUT_TOKENS` 做 ITL 除数，收尾段用分词器重算值，两路口径不一致；抽取 `finalize_request_metrics()` 统一两条调用路径，`test_token_benchmark_ray.py` 新增 2 例（主循环用重算值、主循环与收尾段结果一致）。**发现 E**：结果横幅 `print(f"\Results ...")` 里 `\R` 是非法转义序列，改为 `\n`；新增 1 例断言 stdout 不含字面 `\Results` 且含真实换行。**发现 D**：`llm_correctness()` 默认 `llm_api="chat"` 不在 `SUPPORTED_APIS` 注册表里，直接调库函数不传参会被 `construct_clients` 拒绝；默认值改 `"openai"`，docstring 同步；`test_llm_correctness.py` 新增 2 例（断言"默认值 ∈ 注册表"契约本身 + docstring 不再提 `"chat"`）。计数 99→104 函数、113→118 例。
 - 2026-07-26（核对+补录）：实测全量核对 `python -m pytest tests/ -v`，确认为 **11 文件 / 99 函数 / 113 例**全绿；本表此前遗漏 `test_llm_correctness.py`（2）与 `test_token_benchmark_ray.py`（1）两个既已存在的文件，一并补录；`test_benchmark_runner.py` 函数数按实测更正为 37（含 warmup 相测试）。同时记录一处工作区未提交状态：warmup 的 CLI 级测试已被撤销，见上方 ⚠️ 提示。
 - 2026-07-22（HTTP 直连模式）：新增 `test_benchmark_http_client.py`（10 例，SSE 分帧 + `single_request_sync` 全路径）；`test_benchmark_runner.py` 新增 5 例（`_build_body` 同形回归、分发隔离、闭环+开环端到端假 HTTP 后端、专属线程池尺寸）；`test_benchmark_cli.py` 新增 2 例（`--api-base`/`--api-key-env` 接线与回显）。计数由 8 文件 73 函数/87 例 → 9 文件 90 函数/104 例。
 - 2026-07-20（开环速率模式 + Ray 路线遗留收口）：`test_benchmark_metrics.py`/`test_benchmark_runner.py`/`test_benchmark_cli.py` 随开环请求速率模式扩充；新增 `test_common.py`（M4 注册表）、`test_requests_launcher.py`（M2 空池快速失败）收口上一会话遗留的 Red 测试。
