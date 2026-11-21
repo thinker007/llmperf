@@ -79,3 +79,21 @@ def test_default_llm_api_is_a_registered_supported_api():
 def test_docstring_no_longer_names_the_unregistered_chat_api():
     doc = lc.llm_correctness.__doc__
     assert '"chat"' not in doc
+
+
+def test_cli_llm_api_defaults_to_none_so_key_based_resolution_applies():
+    # 与 token_benchmark_ray.py 一致：不给 --llm-api 时交给 resolve_llm_api 按密钥判定。
+    parsed = lc.args.parse_args(["--model", "m"])
+    assert parsed.llm_api is None
+
+
+def test_cli_resolves_llm_api_from_configured_keys():
+    assert lc.resolve_llm_api(None, {"ANTHROPIC_API_KEY": "ak"}) == "anthropic"
+    src = inspect.getsource(lc)
+    assert "resolve_llm_api(args.llm_api, os.environ)" in src
+
+
+def test_cli_help_documents_openai_and_anthropic():
+    help_text = lc.args.format_help()
+    assert "'openai'" in help_text and "'anthropic'" in help_text
+    assert "ANTHROPIC_API_KEY" in help_text

@@ -332,6 +332,24 @@ python llm_correctness.py \
 
 ```
 
+### Anthropic
+
+`llm_correctness.py` resolves `--llm-api` exactly like `token_benchmark_ray.py`
+(explicit value wins; otherwise only `ANTHROPIC_API_KEY` set -> `anthropic`,
+else `openai`). The correctness test sends `temperature: 0.0` by default; models
+that only accept `temperature=1` (e.g. with adaptive thinking) return 400, so
+override it:
+
+```bash
+export ANTHROPIC_API_KEY=secret_abcdefg
+
+python llm_correctness.py \
+--model "claude-sonnet-5-5" \
+--max-num-completed-requests 2 \
+--num-concurrent-requests 1 \
+--additional-sampling-params '{"temperature": 1}'
+```
+
 see `python llm_correctness.py --help` for more details on the arguments.
 
 

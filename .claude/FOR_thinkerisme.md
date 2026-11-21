@@ -211,3 +211,6 @@ happy-path 代码最爱做的假设是"流式返回的每个 delta 都是我预�
 - **凭据**：`resolve_endpoint(env)` 先认 `ANTHROPIC_*`，没有就借 `OPENAI_*`。坑在 base 常带 `/v1`，直接拼会得到 `/v1/v1/messages`（404 还看不出原因），所以去掉尾部 `/v1`。
 - **先探路再写码**：动手前只发了一个 `max_tokens=8` 的流式请求，确认网关真的支持 `/v1/messages`、认 `x-api-key`、模型名原样可用。这三件事单测证明不了，一次真实请求就能证明。
 - **注意**：同一模型名从 OpenAI 协议换到 Anthropic 协议，测出来的数字不可与以前直接对比；只配了 `ANTHROPIC_API_KEY` 时如想走 OpenAI 协议，显式写 `--llm-api openai`。
+
+- **同一规则扩到 `llm_correctness.py`**：两个脚本原本各写一段 `--llm-api` help，迟早会说法不一。这次把文案抽成 `common.LLM_API_HELP`、判定逻辑共用 `resolve_llm_api`——改规则只改一处（DRY）。
+- **一个新坑**：正确性脚本固定发 `temperature: 0.0`（想要确定性输出），而新模型在 adaptive thinking 下只接受 `temperature=1`，直接 400。路由没错，是参数撞了模型约束——用 `--additional-sampling-params '{"temperature": 1}'` 覆盖即可。教训：**"协议通了"不等于"请求合法"，端到端跑一次才知道。**

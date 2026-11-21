@@ -12,7 +12,12 @@ import ray
 from tqdm import tqdm
 
 from llmperf import common_metrics
-from llmperf.common import SUPPORTED_APIS, construct_clients
+from llmperf.common import (
+    LLM_API_HELP,
+    SUPPORTED_APIS,
+    construct_clients,
+    resolve_llm_api,
+)
 from llmperf.models import RequestConfig
 from llmperf.requests_launcher import RequestsLauncher
 from llmperf.utils import (
@@ -278,11 +283,8 @@ args.add_argument(
 args.add_argument(
     "--llm-api",
     type=str,
-    default="openai",
-    help=(
-        f"The type of request to make. The supported llm apis are {SUPPORTED_APIS} "
-        " (`default: %(default)s`)"
-    ),
+    default=None,
+    help=LLM_API_HELP,
 )
 args.add_argument(
     "--metadata",
@@ -307,7 +309,7 @@ if __name__ == "__main__":
             user_metadata[key] = value
 
     run(
-        llm_api=args.llm_api,
+        llm_api=resolve_llm_api(args.llm_api, os.environ),
         model=args.model,
         test_timeout_s=args.timeout,
         max_num_completed_requests=args.max_num_completed_requests,

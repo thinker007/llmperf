@@ -63,7 +63,7 @@ python token_benchmark_ray.py \
 | 参数 | 默认 | 含义 |
 |---|---|---|
 | `--model` | 必填 | 模型名 |
-| `--llm-api` | 自动：只配了 `ANTHROPIC_API_KEY` → `anthropic`；只配 `OPENAI_API_KEY`、两者都配或都没配 → `openai` | 主要取 `openai`（`/v1/chat/completions`）/ `anthropic`（原生 `/v1/messages`），也接受 `litellm` / `sagemaker` / `vertexai`；显式指定永远优先 |
+| `--llm-api`（`llm_correctness.py` 同规则） | 自动：只配了 `ANTHROPIC_API_KEY` → `anthropic`；只配 `OPENAI_API_KEY`、两者都配或都没配 → `openai` | 主要取 `openai`（`/v1/chat/completions`）/ `anthropic`（原生 `/v1/messages`），也接受 `litellm` / `sagemaker` / `vertexai`；显式指定永远优先 |
 | `--mean-input-tokens` / `--stddev-input-tokens` | 550 / 150 | 输入长度的高斯分布 |
 | `--mean-output-tokens` / `--stddev-output-tokens` | 150 / 80 | 输出长度分布（`mean` 即 `max_tokens`，实际不保证返回这么多） |
 | `--num-concurrent-requests` | 10 | 并发线程数（每线程一个独立 Actor 池） |

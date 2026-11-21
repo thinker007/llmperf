@@ -13,7 +13,11 @@ import pandas as pd
 import ray
 
 from llmperf import common_metrics
-from llmperf.common import SUPPORTED_APIS, construct_clients, resolve_llm_api
+from llmperf.common import (
+    LLM_API_HELP,
+    construct_clients,
+    resolve_llm_api,
+)
 
 from llmperf.models import RequestConfig
 from llmperf.requests_launcher import RequestsLauncher
@@ -471,13 +475,7 @@ args.add_argument(
     "--llm-api",
     type=str,
     default=None,
-    help=(
-        "The llm api protocol: 'openai' (/v1/chat/completions) or 'anthropic' "
-        "(native /v1/messages); also accepts "
-        f"{[a for a in SUPPORTED_APIS if a not in ('openai', 'anthropic')]}. "
-        "When omitted: only ANTHROPIC_API_KEY set -> 'anthropic', "
-        "otherwise (OPENAI_API_KEY set, both set, or neither) -> 'openai'."
-    ),
+    help=LLM_API_HELP,
 )
 args.add_argument(
     "--metadata",

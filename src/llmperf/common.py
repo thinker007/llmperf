@@ -20,6 +20,15 @@ _CLIENT_REGISTRY = {
 
 SUPPORTED_APIS = list(_CLIENT_REGISTRY)
 
+# Shared --llm-api help so every CLI documents the same resolution rule.
+LLM_API_HELP = (
+    "The llm api protocol: 'openai' (/v1/chat/completions) or 'anthropic' "
+    "(native /v1/messages); also accepts "
+    f"{[a for a in SUPPORTED_APIS if a not in ('openai', 'anthropic')]}. "
+    "When omitted: only ANTHROPIC_API_KEY set -> 'anthropic', "
+    "otherwise (OPENAI_API_KEY set, both set, or neither) -> 'openai'."
+)
+
 
 def resolve_llm_api(llm_api: Optional[str], env: Mapping[str, str]) -> str:
     """Pick the client when ``--llm-api`` is omitted.

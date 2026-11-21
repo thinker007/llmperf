@@ -151,5 +151,6 @@ token_benchmark_ray.py
 
 ## 变更记录 (Changelog)
 
+- 2026-11-21（`llm_correctness.py` 按密钥自动选协议）：`--llm-api` 默认改 `None`，复用 `common.resolve_llm_api(args.llm_api, os.environ)`；help 文案抽成 `common.LLM_API_HELP` 由两个脚本共用（DRY）。`test_llm_correctness.py` 新增 3 例（默认 `None`、接线、help 写明 openai/anthropic）。全仓 114 函数 / 128 例全绿；实测仅 `ANTHROPIC_*` → anthropic、仅 `OPENAI_*` → openai。注意：该脚本固定发 `temperature: 0.0`，只接受 `temperature=1` 的模型会 400，需 `--additional-sampling-params '{"temperature": 1}'`。
 - 2026-11-21（Anthropic 自动路由）：`test_common.py` 新增 4 例（`resolve_llm_api` 显式优先 / 仅 `ANTHROPIC_API_KEY` → `anthropic` / 仅 `OPENAI_API_KEY` 或都没配 → `openai` / 两者都配保持 `openai`）；`test_anthropic_messages_client.py` 新增 3 例（`resolve_endpoint` 的 `ANTHROPIC_*` 优先、`OPENAI_*` 回退并去尾部 `/v1`、默认 base 与缺 key 报错）。计数 104→111 函数、118→125 例。
 - 2026-07-05：首次生成本模块文档。
