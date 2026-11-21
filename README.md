@@ -73,10 +73,31 @@ models (`thinking_delta` blocks count toward TTFT). Point `ANTHROPIC_API_BASE`
 at any `/v1/messages`-compatible endpoint (default `https://api.anthropic.com`).
 To benchmark via LiteLLM instead, use `--llm-api litellm --model anthropic/<model>`.
 
+`--llm-api` takes `openai` (`/v1/chat/completions`) or `anthropic` (native
+`/v1/messages`); an explicit value always wins. When it is omitted, the protocol
+follows which key is configured:
+
+| `ANTHROPIC_API_KEY` | `OPENAI_API_KEY` | protocol used |
+|---|---|---|
+| set | unset | `anthropic` |
+| unset | set | `openai` |
+| set | set | `openai` (historical default; pass `--llm-api anthropic` to switch) |
+| unset | unset | `openai` |
+
 Environment variables:
-- `ANTHROPIC_API_KEY` (required) — sent as the `x-api-key` header.
+- `ANTHROPIC_API_KEY` — sent as the `x-api-key` header (required unless the `OPENAI_*` fallback below applies).
 - `ANTHROPIC_API_BASE` (optional) — default `https://api.anthropic.com`.
 - `ANTHROPIC_VERSION` (optional) — default `2023-06-01`.
+
+With an explicit `--llm-api anthropic` and no `ANTHROPIC_API_KEY`, the client
+falls back to `OPENAI_API_BASE` + `OPENAI_API_KEY` (a trailing `/v1` on the base
+is dropped), so a gateway that serves both `/v1/chat/completions` and
+`/v1/messages` needs no extra variables:
+
+```bash
+python token_benchmark_ray.py --model anthropic-ccmax/claude-sonnet-5-5 \
+--llm-api anthropic --mean-input-tokens 7000 --mean-output-tokens 2000
+```
 
 `--mean-output-tokens` maps to the required `max_tokens` field.
 

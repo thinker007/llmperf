@@ -55,6 +55,9 @@ def construct_clients(llm_api, num_clients):
 ```
 **设计要点（单一真相源）**：`SUPPORTED_APIS` 从注册表派生，从此不可能再与实际构造分支漂移——旧的 `if/elif` 版本曾把 `SUPPORTED_APIS` 手写成只含 3 项（漏 `sagemaker`/`vertexai`），导致 CLI `--help` 文案与报错信息漏列两个实际可用选项。新增厂商=注册表加一行，`SUPPORTED_APIS` 与报错自动跟上。守护测试见 `tests/test_common.py`（M4：注册表与 `SUPPORTED_APIS` 同源 + 未知 API 报 `ValueError`）。
 
+### `common.py::resolve_llm_api(llm_api, env) -> str`
+`token_benchmark_ray.py` 的 `--llm-api` 默认为 `None`，由它决定协议：显式值优先；否则按 `env`（传 `os.environ`）判定：只配 `ANTHROPIC_API_KEY` → `"anthropic"`（原生 `/v1/messages`）；只配 `OPENAI_API_KEY`、两者都配或都没配 → `"openai"`（两者都配时保持历史默认，老脚本不会静默换协议）。守护测试见 `tests/test_common.py`。
+
 ### `requests_launcher.py::RequestsLauncher`
 封装 `ray.util.ActorPool`，提供：
 - `launch_requests(request_config)`：仅当池中有空闲 Actor 时才提交任务（`has_free()` 判断），否则本次调用是空操作——调用方需要自己重试。
@@ -148,4 +151,5 @@ token_benchmark_ray.py
 
 ## 变更记录 (Changelog)
 
+- 2026-11-21（Anthropic 自动路由）：`test_common.py` 新增 4 例（`resolve_llm_api` 显式优先 / 仅 `ANTHROPIC_API_KEY` → `anthropic` / 仅 `OPENAI_API_KEY` 或都没配 → `openai` / 两者都配保持 `openai`）；`test_anthropic_messages_client.py` 新增 3 例（`resolve_endpoint` 的 `ANTHROPIC_*` 优先、`OPENAI_*` 回退并去尾部 `/v1`、默认 base 与缺 key 报错）。计数 104→111 函数、118→125 例。
 - 2026-07-05：首次生成本模块文档。

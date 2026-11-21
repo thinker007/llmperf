@@ -98,3 +98,35 @@ def test_full_stream_surfaces_error_frame():
     assert data["type"] == "error"
     assert data["error"]["type"] == "overloaded_error"
     assert data["error"]["message"] == "Overloaded"
+
+
+def test_resolve_endpoint_prefers_anthropic_env():
+    from llmperf.ray_clients.anthropic_messages_client import resolve_endpoint
+
+    env = {
+        "ANTHROPIC_API_BASE": "https://a.example",
+        "ANTHROPIC_API_KEY": "ak",
+        "OPENAI_API_BASE": "https://o.example/v1",
+        "OPENAI_API_KEY": "ok",
+    }
+    assert resolve_endpoint(env) == ("https://a.example/v1/messages", "ak")
+
+
+def test_resolve_endpoint_falls_back_to_openai_env_and_strips_v1():
+    # 网关同时提供 OpenAI 与 Anthropic 协议时，复用 OPENAI_* 且不得拼出 /v1/v1/messages。
+    from llmperf.ray_clients.anthropic_messages_client import resolve_endpoint
+
+    env = {"OPENAI_API_BASE": "https://gw.example/v1/", "OPENAI_API_KEY": "ok"}
+    assert resolve_endpoint(env) == ("https://gw.example/v1/messages", "ok")
+
+
+def test_resolve_endpoint_defaults_base_and_requires_key():
+    import pytest
+    from llmperf.ray_clients.anthropic_messages_client import resolve_endpoint
+
+    assert resolve_endpoint({"ANTHROPIC_API_KEY": "ak"}) == (
+        "https://api.anthropic.com/v1/messages",
+        "ak",
+    )
+    with pytest.raises(ValueError):
+        resolve_endpoint({})

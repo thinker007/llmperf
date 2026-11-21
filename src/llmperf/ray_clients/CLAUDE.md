@@ -41,5 +41,6 @@ def llm_request(self, request_config: RequestConfig) -> Tuple[Dict[str, Any], st
 
 ## 变更记录 (Changelog)
 
+- 2026-11-21（Ray 路线原生 Anthropic 按密钥自动路由）：`token_benchmark_ray.py --llm-api` 默认值改为 `None`，由 `common.resolve_llm_api()` 决定——显式值优先，否则按已配置的密钥判定：只配 `ANTHROPIC_API_KEY` 走原生 `/v1/messages` 客户端，其余（只配 `OPENAI_API_KEY`、两者都配、都没配）仍走 `openai`。`anthropic_messages_client.resolve_endpoint()` 抽成纯函数：`ANTHROPIC_*` 优先，缺失时回退 `OPENAI_API_BASE/KEY`（去尾部 `/v1`，防 `/v1/v1/messages`）。新增 7 个测试函数，全仓 111 函数 / 125 例全绿；实测 `--model anthropic-ccmax/claude-sonnet-5-5` 三条路径（显式 `anthropic`、仅 `ANTHROPIC_*` 自动、仅 `OPENAI_*` 自动 → `openai`）经同一网关均 0 错误。
 - 2026-07-19（高危修复）：**H1** `openai_chat_completions_client.py` 补上 content 分支内 `most_recent_received_token_time = time.monotonic()` 更新，修复逐字延迟(ITL)退化为累计值的测量错误（此前该变量初始化后从未更新）。**H4/H5** `vertexai_client.py`：`response_code` 预置为 `None`（避免 `requests.post` 抛错时 except 分支 `UnboundLocalError` 掩盖真异常）；`GCLOUD_ACCESS_TOKEN` 的 `.strip()` 延后到非空校验之后（避免未设置时 `None.strip()` 抛 `AttributeError` 使友好 `ValueError` 不可达）；去掉重复的 `print(response_code)`。
 - 此前：`anthropic` 由借道 LiteLLM 改为原生 `/v1/messages` 客户端，去中间层以获得更纯净的延迟测量。

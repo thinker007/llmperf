@@ -200,3 +200,14 @@ happy-path 代码最爱做的假设是"流式返回的每个 delta 都是我预�
 - 设计规格：`docs/superpowers/specs/2026-07-15-benchmark-production-hardening-design.md`
 - 实施计划 + 提交映射：`docs/superpowers/plans/2026-07-15-benchmark-production-hardening.md`
 - SDD 执行账本（事实来源）：`.superpowers/sdd/progress.md`
+
+
+## 十一、"一个插座配多种插头"的最后一厘米：让插头自己认插座（2026-11-21）
+原生 Anthropic 客户端早就写好了，可一条再自然不过的命令 `--model anthropic-ccmax/claude-sonnet-5-5` 却没走它——因为 `--llm-api` 默认是 `openai`，环境里也只有 `OPENAI_*` 两个变量。就像买了个万能插座，却还得每次手动拨开关。
+
+- **路由**：`common.resolve_llm_api(llm_api, env)`，显式参数永远赢；没给时看你配了哪把钥匙——只有 `ANTHROPIC_API_KEY` 就走 `/v1/messages`，其余一律 `openai`。
+  - 第一版是按模型名前缀 `anthropic` 猜的，后来改掉了：模型名是网关自己起的标签（OpenAI 兼容聚合商上也常见 `anthropic/...`），拿它猜协议会误判；密钥则是你亲手配的意图，更可靠。
+  - 两把钥匙都配时**不猜**，保持历史默认 `openai`——宁可让人多写一个 `--llm-api anthropic`，也不让老脚本悄悄换协议、测出没法对比的数字。
+- **凭据**：`resolve_endpoint(env)` 先认 `ANTHROPIC_*`，没有就借 `OPENAI_*`。坑在 base 常带 `/v1`，直接拼会得到 `/v1/v1/messages`（404 还看不出原因），所以去掉尾部 `/v1`。
+- **先探路再写码**：动手前只发了一个 `max_tokens=8` 的流式请求，确认网关真的支持 `/v1/messages`、认 `x-api-key`、模型名原样可用。这三件事单测证明不了，一次真实请求就能证明。
+- **注意**：同一模型名从 OpenAI 协议换到 Anthropic 协议，测出来的数字不可与以前直接对比；只配了 `ANTHROPIC_API_KEY` 时如想走 OpenAI 协议，显式写 `--llm-api openai`。

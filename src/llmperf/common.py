@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Mapping, Optional
 from llmperf.ray_clients.anthropic_messages_client import AnthropicMessagesClient
 from llmperf.ray_clients.litellm_client import LiteLLMClient
 from llmperf.ray_clients.openai_chat_completions_client import (
@@ -19,6 +19,21 @@ _CLIENT_REGISTRY = {
 }
 
 SUPPORTED_APIS = list(_CLIENT_REGISTRY)
+
+
+def resolve_llm_api(llm_api: Optional[str], env: Mapping[str, str]) -> str:
+    """Pick the client when ``--llm-api`` is omitted.
+
+    An explicit value always wins. Otherwise only ``ANTHROPIC_API_KEY`` set
+    (no ``OPENAI_API_KEY``) selects the native Messages client; every other
+    case keeps the historical ``openai`` default, so scripts with both keys
+    do not silently switch protocol.
+    """
+    if llm_api:
+        return llm_api
+    if env.get("ANTHROPIC_API_KEY") and not env.get("OPENAI_API_KEY"):
+        return "anthropic"
+    return "openai"
 
 
 def construct_clients(llm_api: str, num_clients: int) -> List[LLMClient]:

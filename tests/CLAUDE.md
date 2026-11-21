@@ -10,7 +10,7 @@
 python -m pytest tests/ -v
 ```
 
-当前全绿：**11 个文件 / 104 个测试函数 / pytest 展开 118 例**（2026-09-10 实测核对）。
+当前全绿：**11 个文件 / 111 个测试函数 / pytest 展开 125 例**（2026-11-21 实测核对）。
 
 ## 文件清单
 
@@ -43,6 +43,7 @@ python -m pytest tests/ -v
 
 ## 变更记录 (Changelog)
 
+- 2026-11-21（Anthropic 自动路由）：`test_common.py` 新增 4 例（`resolve_llm_api` 显式优先 / 仅 `ANTHROPIC_API_KEY` → `anthropic` / 仅 `OPENAI_API_KEY` 或都没配 → `openai` / 两者都配保持 `openai`）；`test_anthropic_messages_client.py` 新增 3 例（`resolve_endpoint` 的 `ANTHROPIC_*` 优先、`OPENAI_*` 回退并去尾部 `/v1`、默认 base 与缺 key 报错）。计数 104→111 函数、118→125 例。
 - 2026-09-10（审计发现 A/D/E 重做，逐条 TDD）：三处独立提交，每处 Red→实现→black→Green。**发现 A**：`token_benchmark_ray.py` 主循环用客户端回传的陈旧 `NUM_OUTPUT_TOKENS` 做 ITL 除数，收尾段用分词器重算值，两路口径不一致；抽取 `finalize_request_metrics()` 统一两条调用路径，`test_token_benchmark_ray.py` 新增 2 例（主循环用重算值、主循环与收尾段结果一致）。**发现 E**：结果横幅 `print(f"\Results ...")` 里 `\R` 是非法转义序列，改为 `\n`；新增 1 例断言 stdout 不含字面 `\Results` 且含真实换行。**发现 D**：`llm_correctness()` 默认 `llm_api="chat"` 不在 `SUPPORTED_APIS` 注册表里，直接调库函数不传参会被 `construct_clients` 拒绝；默认值改 `"openai"`，docstring 同步；`test_llm_correctness.py` 新增 2 例（断言"默认值 ∈ 注册表"契约本身 + docstring 不再提 `"chat"`）。计数 99→104 函数、113→118 例。
 - 2026-07-26（核对+补录）：实测全量核对 `python -m pytest tests/ -v`，确认为 **11 文件 / 99 函数 / 113 例**全绿；本表此前遗漏 `test_llm_correctness.py`（2）与 `test_token_benchmark_ray.py`（1）两个既已存在的文件，一并补录；`test_benchmark_runner.py` 函数数按实测更正为 37（含 warmup 相测试）。同时记录一处工作区未提交状态：warmup 的 CLI 级测试已被撤销，见上方 ⚠️ 提示。
 - 2026-07-22（HTTP 直连模式）：新增 `test_benchmark_http_client.py`（10 例，SSE 分帧 + `single_request_sync` 全路径）；`test_benchmark_runner.py` 新增 5 例（`_build_body` 同形回归、分发隔离、闭环+开环端到端假 HTTP 后端、专属线程池尺寸）；`test_benchmark_cli.py` 新增 2 例（`--api-base`/`--api-key-env` 接线与回显）。计数由 8 文件 73 函数/87 例 → 9 文件 90 函数/104 例。

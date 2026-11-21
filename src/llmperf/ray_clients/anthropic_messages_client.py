@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import ray
 import requests
@@ -12,6 +12,32 @@ from llmperf import common_metrics
 
 # Anthropic requires max_tokens; fall back to this when the caller omits it.
 DEFAULT_MAX_TOKENS = 512
+DEFAULT_API_BASE = "https://api.anthropic.com"
+
+
+def resolve_endpoint(env: Mapping[str, str]) -> Tuple[str, str]:
+    """Return ``(messages_url, api_key)`` from the environment.
+
+    ``ANTHROPIC_API_BASE``/``ANTHROPIC_API_KEY`` win. Without them, fall back
+    to ``OPENAI_API_BASE``/``OPENAI_API_KEY`` so a gateway that speaks both
+    protocols needs no extra variables; a trailing ``/v1`` on that base is
+    dropped to avoid ``/v1/v1/messages``.
+    """
+    if env.get("ANTHROPIC_API_KEY"):
+        base = env.get("ANTHROPIC_API_BASE") or DEFAULT_API_BASE
+        key = env["ANTHROPIC_API_KEY"]
+    elif env.get("OPENAI_API_KEY") and env.get("OPENAI_API_BASE"):
+        base = env["OPENAI_API_BASE"]
+        key = env["OPENAI_API_KEY"]
+    else:
+        raise ValueError(
+            "set ANTHROPIC_API_KEY (and optionally ANTHROPIC_API_BASE), "
+            "or OPENAI_API_BASE + OPENAI_API_KEY for a gateway that serves /v1/messages."
+        )
+    base = base.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return base + "/v1/messages", key
 
 
 def parse_data_line(chunk: bytes) -> Optional[Dict[str, Any]]:
@@ -87,21 +113,13 @@ class AnthropicMessagesClient(LLMClient):
         start_time = time.monotonic()
         most_recent_received_token_time = time.monotonic()
 
-        address = os.environ.get("ANTHROPIC_API_BASE", "https://api.anthropic.com")
-        if not address:
-            raise ValueError("the environment variable ANTHROPIC_API_BASE must be set.")
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise ValueError("the environment variable ANTHROPIC_API_KEY must be set.")
+        address, key = resolve_endpoint(os.environ)
         version = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
         headers = {
             "x-api-key": key,
             "anthropic-version": version,
             "content-type": "application/json",
         }
-        if not address.endswith("/"):
-            address = address + "/"
-        address += "v1/messages"
         try:
             with requests.post(
                 address,

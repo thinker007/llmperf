@@ -13,7 +13,7 @@ import pandas as pd
 import ray
 
 from llmperf import common_metrics
-from llmperf.common import SUPPORTED_APIS, construct_clients
+from llmperf.common import SUPPORTED_APIS, construct_clients, resolve_llm_api
 
 from llmperf.models import RequestConfig
 from llmperf.requests_launcher import RequestsLauncher
@@ -79,7 +79,7 @@ def get_token_throughput_latencies(
         num_concurrent_requests: The number of concurrent requests to make. Increase
             this to increase the amount of load and vice versa.
         test_timeout_s: The amount of time to run the test for before reporting results.
-        llm_api: The name of the llm api to use. Either "openai" or "litellm".
+        llm_api: The name of the llm api to use, one of SUPPORTED_APIS.
 
     Returns:
         A summary of the performance metrics collected across all completed requests
@@ -470,10 +470,13 @@ args.add_argument(
 args.add_argument(
     "--llm-api",
     type=str,
-    default="openai",
+    default=None,
     help=(
-        f"The name of the llm api to use. Can select from {SUPPORTED_APIS}"
-        " (default: %(default)s)"
+        "The llm api protocol: 'openai' (/v1/chat/completions) or 'anthropic' "
+        "(native /v1/messages); also accepts "
+        f"{[a for a in SUPPORTED_APIS if a not in ('openai', 'anthropic')]}. "
+        "When omitted: only ANTHROPIC_API_KEY set -> 'anthropic', "
+        "otherwise (OPENAI_API_KEY set, both set, or neither) -> 'openai'."
     ),
 )
 args.add_argument(
@@ -499,7 +502,7 @@ if __name__ == "__main__":
             user_metadata[key] = value
 
     run_token_benchmark(
-        llm_api=args.llm_api,
+        llm_api=resolve_llm_api(args.llm_api, os.environ),
         model=args.model,
         test_timeout_s=args.timeout,
         max_num_completed_requests=args.max_num_completed_requests,
